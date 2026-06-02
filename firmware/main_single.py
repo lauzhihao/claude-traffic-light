@@ -50,7 +50,9 @@ last = time.ticks_ms()
 while True:
     if poll.poll(0):
         ch = sys.stdin.read(1)
-        if ch in ('R', 'Y', 'G', '0'):
+        # 只在状态真的变化时重置;收到与当前相同的状态字节直接忽略,这样
+        # agent 周期性强制重发(兜底重连)不会每次打断呼吸/慢闪动画。
+        if ch in ('R', 'Y', 'G', '0') and ch != state:
             state = ch
             phase = 0.0
             fill(COLORS[ch])

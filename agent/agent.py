@@ -166,22 +166,34 @@ def aggregate_state():
     return best or "0"
 
 
-def refresh_light():
-    """重算聚合,变化时才写串口(并顺手推中继,未配则空转)。"""
+def refresh_light(force=False):
+    """重算聚合并刷新灯。
+
+    - 状态真正变化时:写串口 + 推中继 + 打日志。
+    - force=True(周期兜底):无条件再写一次串口,但不重复推中继/打日志。
+      用来兜住"灯被拔插/复位后丢状态"——固件开机自检后会归 0(灭),而
+      agent 这边聚合值没变就不会主动补发,于是灯一直停在灭。周期强制重发
+      让重新插上的灯最多 LIGHT_REFRESH_S 秒自动恢复到当前状态。
+    """
     global last_serial
     agg = aggregate_state()
-    if agg != last_serial:
-        last_serial = agg
+    changed = agg != last_serial
+    if changed or force:
         write_serial(agg)
+    if changed:
+        last_serial = agg
         threading.Thread(target=push_state, args=(agg,), daemon=True).start()
         print(f"[light] -> {agg}   sessions={summarize_sessions()}", file=sys.stderr)
     return agg
 
 
 def light_loop():
+    # 每周期强制重发当前状态(force=True):灯拔插/复位后固件归 0、agent 状态
+    # 没变就不会主动补发,这里兜底让灯自动恢复。配合固件"同状态字节忽略",
+    # 稳态下重发是空操作,不会打断红呼吸/黄慢闪的动画。
     while True:
         try:
-            refresh_light()
+            refresh_light(force=True)
         except Exception as e:
             print(f"[light_loop] {e}", file=sys.stderr)
         time.sleep(LIGHT_REFRESH_S)

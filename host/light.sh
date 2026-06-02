@@ -29,7 +29,9 @@ if [ "$STATE" = "G" ] && command -v jq >/dev/null 2>&1; then
   _TRANSCRIPT=$(printf '%s' "$HOOK_JSON" | jq -r '.transcript_path // empty' 2>/dev/null)
   if [ -n "${_TRANSCRIPT:-}" ] && [ -f "$_TRANSCRIPT" ]; then
     _LAST=$(tail -n 400 "$_TRANSCRIPT" | jq -rs '[.[]|select(.type=="assistant").message.content[]?|select(.type=="text").text]|last // empty' 2>/dev/null || true)
-    if printf '%s' "${_LAST:-}" | grep -qiE "$WAIT_PATTERN"; then
+    # 只匹配「最后一非空行」:协议把"等授权"标记放在结尾那行;正文里提到该词(比如讨论本功能)不算,避免误判
+    _LASTLINE=$(printf '%s' "${_LAST:-}" | grep -v '^[[:space:]]*$' | tail -n 1)
+    if printf '%s' "${_LASTLINE:-}" | grep -qiE "$WAIT_PATTERN"; then
       STATE=Y
     fi
   fi

@@ -13,14 +13,14 @@ import neopixel
 
 DATA_PIN = 15      # 外接单颗 WS2812;板载灯改成 16
 NUM_LEDS = 1
-BRIGHTNESS = 120   # 0-255
+BRIGHTNESS = 255   # 0-255(整体亮度:红峰值 / 黄峰值 / 绿常亮 全部满亮 255)
 
 np = neopixel.NeoPixel(Pin(DATA_PIN), NUM_LEDS)
 
 COLORS = {
     'R': (BRIGHTNESS, 0, 0),                      # 红
     'Y': (BRIGHTNESS, int(BRIGHTNESS * 0.5), 0),  # 琥珀黄
-    'G': (0, BRIGHTNESS, 0),                       # 绿
+    'G': (0, BRIGHTNESS, 0),                       # 绿(常亮,满亮 255)
     '0': (0, 0, 0),                                # 灭
 }
 
@@ -66,11 +66,11 @@ while True:
         # 呼吸:三角波,约 2s 一循环,亮度 5%~100%
         phase = (phase + dt / 2.0) % 1.0
         f = phase * 2 if phase < 0.5 else 2 - phase * 2
-        f = 0.05 + 0.95 * f
+        f = 0.05 + 0.95 * f   # 谷底 5% → 峰值 100%(改第一个数调谷底)
         fill(scale(COLORS['R'], f))
     elif state == 'Y':
-        # 慢闪:周期 1.2s,亮 0.8s 灭 0.4s
-        phase = (phase + dt / 1.2) % 1.0
+        # 快闪:周期 0.7s,亮 ~0.47s 灭 ~0.23s
+        phase = (phase + dt / 0.7) % 1.0
         fill(COLORS['Y'] if phase < 0.67 else (0, 0, 0))
     # G / 0 常亮,fill 已处理
 

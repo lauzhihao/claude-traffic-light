@@ -10,11 +10,12 @@
 #   light.sh Y    Notification
 #   light.sh G    Stop
 #   light.sh PRE  PreToolUse  ← 不改状态，只把工具信息送给 agent 暂存
+#   light.sh PING Pre/PostToolUse(所有工具) ← 心跳:刷新会话时间戳保住 R,不改颜色
 
 set -u
 
 STATE="${1:-}"
-case "$STATE" in R|Y|G|PRE) ;; *) exit 0 ;; esac
+case "$STATE" in R|Y|G|PRE|PING) ;; *) exit 0 ;; esac
 
 # 读 hook 的 stdin JSON（Claude Code 会传 session_id / tool_name / tool_input 等）
 HOOK_JSON="{}"
@@ -47,8 +48,8 @@ if curl -sS -m 2 -X POST "http://$AGENT_HOST:$AGENT_PORT/event" \
   exit 0
 fi
 
-# Agent 不在 → fallback。PRE 只对 agent 有意义，直接退出
-[ "$STATE" = "PRE" ] && exit 0
+# Agent 不在 → fallback。PRE/PING 只对 agent 有意义(暂存/心跳),直接退出,不写串口
+case "$STATE" in PRE|PING) exit 0 ;; esac
 
 # 直推中继（后台）
 if [ -n "${CLAUDE_LIGHT_RELAY_URL:-}" ] && [ -n "${CLAUDE_LIGHT_UPDATE_SECRET:-}" ]; then

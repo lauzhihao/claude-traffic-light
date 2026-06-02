@@ -25,9 +25,10 @@ AGENT_HOST="${CLAUDE_LIGHT_AGENT_HOST:-}"
 chmod +x "$LIGHT_SH" "$AGENT_PY" 2>/dev/null || true
 
 # hooks 合并(两模式共用)。$1 = 命令前缀(CLAUDE_LIGHT_SERIAL=... 或 CLAUDE_LIGHT_AGENT_HOST=...)
-# 逐事件幂等追加:某事件已含引用 host/light.sh 的 hook 就跳过(不重复加、保留你其它 hook)。
+# 逐事件幂等追加:用各自的特征串判断是否已存在,已存在就跳过(不重复加、保留你其它 hook)。
 # 状态映射:UserPromptSubmit→R 推理 / Notification→Y 等你 / Stop→G 完成
 #          PreToolUse(AskUserQuestion)→Y(Claude 问你=等你) / PostToolUse(同)→R(答完继续)
+#          Pre/PostToolUse(所有工具)→PING 心跳:刷新会话 ts 保住 R;中断后无心跳 ~R_STALE_S(默认60s)降级 G
 merge_hooks() {
   local cmd="$1 '$LIGHT_SH'"
   if ! command -v jq >/dev/null 2>&1; then
@@ -37,22 +38,28 @@ merge_hooks() {
     echo "  Stop             → $cmd G || true"
     echo "  PreToolUse(matcher AskUserQuestion)  → $cmd Y || true"
     echo "  PostToolUse(matcher AskUserQuestion) → $cmd R || true"
+    echo "  PreToolUse(matcher \"\" 所有工具)   → $cmd PING || true"
+    echo "  PostToolUse(matcher \"\" 所有工具)  → $cmd PING || true"
     return
   fi
   mkdir -p "$HOME/.claude"; [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
   cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
   local tmp; tmp="$(mktemp)"
-  jq --arg r "$cmd R || true" --arg y "$cmd Y || true" --arg g "$cmd G || true" '
-    def add($ev; $obj):
+  jq --arg r "$cmd R || true" --arg y "$cmd Y || true" --arg g "$cmd G || true" --arg p "$cmd PING || true" '
+    # 幂等:事件数组里已含 $needle 子串就不再追加。简单事件用 host/light.sh 判断;
+    # Pre/PostToolUse 同一事件要放两条(AskUserQuestion 与 PING),各用自己的特征串区分。
+    def add($ev; $obj; $needle):
       .hooks[$ev] = ((.hooks[$ev] // []) as $a
-        | if ($a | tostring | test("host/light\\.sh")) then $a else $a + [$obj] end);
-    add("UserPromptSubmit"; {hooks:[{type:"command",command:$r}]}) |
-    add("Notification";     {hooks:[{type:"command",command:$y}]}) |
-    add("Stop";             {hooks:[{type:"command",command:$g}]}) |
-    add("PreToolUse";       {matcher:"AskUserQuestion",hooks:[{type:"command",command:$y}]}) |
-    add("PostToolUse";      {matcher:"AskUserQuestion",hooks:[{type:"command",command:$r}]})
+        | if ($a | tostring | contains($needle)) then $a else $a + [$obj] end);
+    add("UserPromptSubmit"; {hooks:[{type:"command",command:$r}]}; "host/light.sh") |
+    add("Notification";     {hooks:[{type:"command",command:$y}]}; "host/light.sh") |
+    add("Stop";             {hooks:[{type:"command",command:$g}]}; "host/light.sh") |
+    add("PreToolUse";       {matcher:"AskUserQuestion",hooks:[{type:"command",command:$y}]}; "AskUserQuestion") |
+    add("PostToolUse";      {matcher:"AskUserQuestion",hooks:[{type:"command",command:$r}]}; "AskUserQuestion") |
+    add("PreToolUse";       {matcher:"",hooks:[{type:"command",command:$p}]}; "PING || true") |
+    add("PostToolUse";      {matcher:"",hooks:[{type:"command",command:$p}]}; "PING || true")
   ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
-  echo "✓ hooks 已幂等合并到 $SETTINGS(含 AskUserQuestion→黄;原文件已备份)"
+  echo "✓ hooks 已幂等合并到 $SETTINGS(含 AskUserQuestion→黄、所有工具→PING 心跳;原文件已备份)"
 }
 
 # ===== 客户端模式 =====

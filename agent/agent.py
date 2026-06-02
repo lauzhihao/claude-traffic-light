@@ -43,6 +43,7 @@ CLAUDE_PROJECTS_DIR = Path(os.environ.get(
 QUOTA_INTERVAL_S = 30
 COMMAND_POLL_S = 1
 SESSION_STALE_S = int(os.environ.get("CLAUDE_LIGHT_SESSION_STALE_S", "600"))
+R_STALE_S = int(os.environ.get("CLAUDE_LIGHT_R_STALE_S", "60"))   # R(推理)无心跳超时→降级 G(应对 ESC 中断不触发任何 hook)
 LIGHT_REFRESH_S = 3        # 强制重发间隔=灯拔插后最大恢复延迟;每次仅 glob+1字节串口写,开销可忽略
 
 # 优先级:数字大者优先。Y(等你)> R(推理)> G(完成)
@@ -56,6 +57,7 @@ state_lock = threading.Lock()
 sessions = {}              # {session_id: {"state": "R"/"Y"/"G", "ts": float}}
 last_serial = None         # 上次写入串口的聚合值,变化时才重写
 current_quota = {}
+stats = {"pings": 0}       # 诊断计数:收到的心跳数,看 /health
 
 
 def client_allowed(ip):
@@ -152,13 +154,23 @@ def summarize_sessions():
 
 
 def aggregate_state():
-    """剔除过期会话,返回 Y/R/G 聚合值;一个会话都没有则返回 '0'(灭)。"""
+    """剔除过期会话,返回 Y/R/G 聚合值;一个会话都没有则返回 '0'(灭)。
+
+    两级超时:① 任何会话超过 SESSION_STALE_S 直接剔除(防崩溃会话永久占灯);
+    ② R(推理)会话超过 R_STALE_S 没有心跳/事件 → 降级为 G。ESC 中断不触发任何
+    hook,靠 ② 把"卡红"在 ~R_STALE_S 内放掉;真在干活时工具调用的心跳(PING)会
+    不停刷新 ts,所以不会被误降级。
+    """
     now = time.time()
     best, best_pri = None, 0
     with state_lock:
         for sid in list(sessions):
-            if now - sessions[sid]["ts"] > SESSION_STALE_S:
+            age = now - sessions[sid]["ts"]
+            if age > SESSION_STALE_S:
                 del sessions[sid]
+                continue
+            if sessions[sid]["state"] == "R" and age > R_STALE_S:
+                sessions[sid]["state"] = "G"   # 不再推理(中断/回合悄悄结束)→ 当作完成/空闲
         for s in sessions.values():
             pri = PRIORITY.get(s["state"], 0)
             if pri > best_pri:
@@ -296,6 +308,16 @@ class HookHandler(BaseHTTPRequestHandler):
         if state == "PRE":
             self._respond(200); return
 
+        if state == "PING":
+            # 心跳(来自工具 Pre/PostToolUse):刷新会话 ts,保住 R 不被 R_STALE_S 降级。
+            # 只刷新已存在会话、不改颜色、不新建——即便和 AskUserQuestion→Y 同时触发也不抢色。
+            stats["pings"] += 1
+            sid = session_id or "default"
+            with state_lock:
+                if sid in sessions:
+                    sessions[sid]["ts"] = time.time()
+            self._respond(200); return
+
         if state == "START":
             set_session(session_id, "G")
             refresh_light(); self._respond(200); return
@@ -323,6 +345,8 @@ class HookHandler(BaseHTTPRequestHandler):
                 "serial_glob": SERIAL_GLOB,
                 "bind": f"{LISTEN_BIND}:{LISTEN_PORT}",
                 "relay": bool(RELAY_URL),
+                "pings": stats["pings"],
+                "r_stale_s": R_STALE_S,
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

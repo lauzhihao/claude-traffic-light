@@ -107,6 +107,8 @@ def scan_quota():
 
 def quota_loop():
     global current_quota
+    if not RELAY_URL:
+        return  # 配额只用于中继(iOS)推送;没配中继就不扫,省得反复读一堆 jsonl
     while True:
         try:
             current_quota = scan_quota()
@@ -316,16 +318,15 @@ def main():
     print(f"[agent] relay: {RELAY_URL or '(not configured)'}")
     print(f"[agent] priority: Y > R > G   stale cutoff: {SESSION_STALE_S}s")
 
-    global current_quota
-    current_quota = scan_quota()
-
-    # 启动即把灯归到"无会话=灭",随后各会话上报后点亮
+    # 启动即把灯归到"无会话=灭"
     refresh_light()
 
+    # 后台线程:配额扫描(仅配了中继才跑)、命令轮询、灯超时刷新
     threading.Thread(target=quota_loop, daemon=True).start()
     threading.Thread(target=command_loop, daemon=True).start()
     threading.Thread(target=light_loop, daemon=True).start()
 
+    # 立刻开始监听,不被初始配额扫描阻塞(launchd 下 IO 受限会拖死启动)
     server = HTTPServer(("127.0.0.1", LISTEN_PORT), HookHandler)
     try:
         server.serve_forever()

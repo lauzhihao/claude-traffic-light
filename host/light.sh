@@ -25,7 +25,8 @@ fi
 PAYLOAD=$(printf '{"state":"%s","hook":%s}' "$STATE" "$HOOK_JSON")
 
 AGENT_PORT="${CLAUDE_LIGHT_AGENT_PORT:-7321}"
-if curl -sS -m 1 -X POST "http://127.0.0.1:$AGENT_PORT/event" \
+AGENT_HOST="${CLAUDE_LIGHT_AGENT_HOST:-127.0.0.1}"   # 多机同步:设成「插灯那台」的 tailscale IP
+if curl -sS -m 2 -X POST "http://$AGENT_HOST:$AGENT_PORT/event" \
      -H "Content-Type: application/json" \
      -d "$PAYLOAD" >/dev/null 2>&1; then
   exit 0

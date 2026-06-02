@@ -1,43 +1,73 @@
 #!/usr/bin/env bash
-# Claude 红绿灯 · 一键本地部署(macOS,无 iOS)
+# Claude 红绿灯 · 一键部署(macOS / Linux,自动判断模式)
 #
-# 在一台新机器上启用红绿灯,只需三步:
-#   1. git clone 本仓库
-#   2. 跑这个脚本:  bash agent/install.sh
-#   3. 把红绿灯的 USB 插上
+#   服务端(插灯那台):
+#       bash agent/install.sh
+#     起 agent(macOS 用 launchd 常驻)+ 本机 hooks。多机同步时让 agent 监听 tailnet:
+#       CLAUDE_LIGHT_BIND=0.0.0.0 bash agent/install.sh
 #
-# 它会自动:
-#   - 探测仓库路径 / python3 / 串口
-#   - 生成并加载 launchd 服务(开机自启 + 崩溃重启 agent.py)
-#   - 把 3 个 hook 合并进 ~/.claude/settings.json(先备份,幂等,不动你已有配置)
+#   客户端(其它机器,把状态同步到插灯那台):
+#       CLAUDE_LIGHT_AGENT_HOST=<插灯那台的 tailscale IP> bash agent/install.sh
+#     只配 hooks(状态 POST 到那台 agent),不起 agent、不碰串口。
 #
-# 前提:Pico 已烧好 MicroPython + firmware/main.py(见 firmware/README.md),
-#       且 3 颗 WS2812 已按 HARDWARE.md 接好。固件在 Pico 上,跟机器无关——
-#       换机器只需把这个 USB 设备插到新机器即可,不用重新烧。
+# 前提:服务端的 Pico 已烧好固件 + 接好线(见 firmware/README.md、HARDWARE.md)。
 
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIGHT_SH="$REPO/host/light.sh"
 AGENT_PY="$REPO/agent/agent.py"
-PY="$(command -v python3 || true)"
-SERIAL="${CLAUDE_LIGHT_SERIAL:-/dev/cu.usbmodem*}"   # 换机器一般不用改;Linux 用 /dev/ttyACM*
-PORT="${CLAUDE_LIGHT_AGENT_PORT:-7321}"
-PLIST="$HOME/Library/LaunchAgents/com.claudelight.agent.plist"
 SETTINGS="$HOME/.claude/settings.json"
+PORT="${CLAUDE_LIGHT_AGENT_PORT:-7321}"
+AGENT_HOST="${CLAUDE_LIGHT_AGENT_HOST:-}"
 
-[ -n "$PY" ]        || { echo "✗ 找不到 python3,请先装(brew install python3)"; exit 1; }
-[ -f "$AGENT_PY" ]  || { echo "✗ 找不到 $AGENT_PY,确认在仓库里运行"; exit 1; }
+[ -f "$LIGHT_SH" ] || { echo "✗ 找不到 $LIGHT_SH,确认在仓库目录里运行"; exit 1; }
 chmod +x "$LIGHT_SH" "$AGENT_PY" 2>/dev/null || true
 
-echo "仓库:    $REPO"
-echo "python3: $PY"
-echo "串口:    $SERIAL"
-echo ""
+# hooks 合并(两模式共用)。$1 = 命令前缀环境变量(如 CLAUDE_LIGHT_SERIAL=... / CLAUDE_LIGHT_AGENT_HOST=...)
+merge_hooks() {
+  local cmd="$1 '$LIGHT_SH'"
+  if [ -f "$SETTINGS" ] && grep -q "host/light.sh" "$SETTINGS" 2>/dev/null; then
+    echo "✓ settings.json 已含 light.sh hooks,跳过合并"
+  elif command -v jq >/dev/null 2>&1; then
+    mkdir -p "$HOME/.claude"; [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
+    cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
+    local tmp; tmp="$(mktemp)"
+    jq --arg r "$cmd R || true" --arg y "$cmd Y || true" --arg g "$cmd G || true" '
+      .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{hooks:[{type:"command",command:$r}]}]) |
+      .hooks.Notification     = ((.hooks.Notification     // []) + [{hooks:[{type:"command",command:$y}]}]) |
+      .hooks.Stop             = ((.hooks.Stop             // []) + [{hooks:[{type:"command",command:$g}]}])
+    ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
+    echo "✓ 已合并 hooks 到 $SETTINGS(原文件已备份 .bak.*)"
+  else
+    echo "⚠ 未装 jq,请手动把以下三段并进 $SETTINGS 的 \"hooks\":"
+    echo "  UserPromptSubmit → $cmd R || true"
+    echo "  Notification     → $cmd Y || true"
+    echo "  Stop             → $cmd G || true"
+  fi
+}
 
-# ---- 1) 生成 launchd plist ----
-mkdir -p "$HOME/Library/LaunchAgents"
-cat > "$PLIST" <<EOF
+# ===== 客户端模式 =====
+if [ -n "$AGENT_HOST" ]; then
+  echo "模式:客户端 → 状态上报到 $AGENT_HOST:$PORT(本机不起 agent)"
+  merge_hooks "CLAUDE_LIGHT_AGENT_HOST='$AGENT_HOST'"
+  echo ""
+  echo "完成!本机的 Claude 会话状态会同步到 $AGENT_HOST 的灯。"
+  echo "  自测: echo '{\"session_id\":\"test\"}' | CLAUDE_LIGHT_AGENT_HOST=$AGENT_HOST \"$LIGHT_SH\" R"
+  exit 0
+fi
+
+# ===== 服务端模式(插灯那台)=====
+PY="$(command -v python3 || true)"
+SERIAL="${CLAUDE_LIGHT_SERIAL:-/dev/cu.usbmodem*}"
+BIND="${CLAUDE_LIGHT_BIND:-127.0.0.1}"   # 多机同步设 0.0.0.0(让 tailnet 上的机器够得着)
+[ -n "$PY" ] || { echo "✗ 找不到 python3"; exit 1; }
+echo "模式:服务端  仓库=$REPO  python3=$PY  串口=$SERIAL  监听=$BIND:$PORT"
+
+if [ "$(uname)" = "Darwin" ]; then
+  PLIST="$HOME/Library/LaunchAgents/com.claudelight.agent.plist"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -48,6 +78,7 @@ cat > "$PLIST" <<EOF
   <key>EnvironmentVariables</key>
   <dict>
     <key>CLAUDE_LIGHT_SERIAL</key><string>$SERIAL</string>
+    <key>CLAUDE_LIGHT_BIND</key><string>$BIND</string>
     <key>CLAUDE_LIGHT_AGENT_PORT</key><string>$PORT</string>
     <key>PYTHONUNBUFFERED</key><string>1</string>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
@@ -59,37 +90,15 @@ cat > "$PLIST" <<EOF
 </dict>
 </plist>
 EOF
-echo "✓ 已生成 $PLIST"
-
-# ---- 2) 加载 launchd ----
-launchctl unload "$PLIST" 2>/dev/null || true
-launchctl load -w "$PLIST"
-echo "✓ launchd 已加载(开机自启 + 崩溃自动重启)"
-
-# ---- 3) 合并 hooks 到 ~/.claude/settings.json(备份 + 幂等)----
-CMD="CLAUDE_LIGHT_SERIAL='$SERIAL' '$LIGHT_SH'"
-if [ -f "$SETTINGS" ] && grep -q "host/light.sh" "$SETTINGS" 2>/dev/null; then
-  echo "✓ settings.json 已含 light.sh hooks,跳过合并"
-elif command -v jq >/dev/null 2>&1; then
-  mkdir -p "$HOME/.claude"
-  [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
-  cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
-  tmp="$(mktemp)"
-  jq --arg r "$CMD R || true" --arg y "$CMD Y || true" --arg g "$CMD G || true" '
-    .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{hooks:[{type:"command",command:$r}]}]) |
-    .hooks.Notification     = ((.hooks.Notification     // []) + [{hooks:[{type:"command",command:$y}]}]) |
-    .hooks.Stop             = ((.hooks.Stop             // []) + [{hooks:[{type:"command",command:$g}]}])
-  ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
-  echo "✓ 已把 hooks 合并进 $SETTINGS(原文件已备份为 .bak.*)"
+  launchctl unload "$PLIST" 2>/dev/null || true
+  launchctl load -w "$PLIST"
+  echo "✓ launchd 已加载(开机自启 + 崩溃重启),日志 /tmp/claude-light-agent.log"
 else
-  echo "⚠ 未装 jq,请手动把以下三段合并进 $SETTINGS 的 \"hooks\":"
-  echo "  UserPromptSubmit → $CMD R || true"
-  echo "  Notification     → $CMD Y || true"
-  echo "  Stop             → $CMD G || true"
+  echo "⚠ 非 macOS:请自行让 agent 常驻(systemd/nohup 等),用这些环境变量:"
+  echo "    CLAUDE_LIGHT_SERIAL='$SERIAL' CLAUDE_LIGHT_BIND='$BIND' CLAUDE_LIGHT_AGENT_PORT='$PORT' '$PY' '$AGENT_PY'"
 fi
 
+merge_hooks "CLAUDE_LIGHT_SERIAL='$SERIAL'"
 echo ""
-echo "完成!插上红绿灯 USB,在 Claude Code 里随便聊一句,灯就会动。"
+echo "完成!插上红绿灯 USB,在 Claude Code 里聊一句就会动。"
 echo "  健康检查: curl -s localhost:$PORT/health"
-echo "  看日志:   tail -f /tmp/claude-light-agent.log"
-echo "  停用:     launchctl unload $PLIST"

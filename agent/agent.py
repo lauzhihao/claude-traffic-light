@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""Claude 红绿灯 · Mac agent(多会话聚合版)
+"""Claude 红绿灯 · Mac agent(多会话聚合 · tailnet 版)
 
-驻留在 Mac 上的后台进程:
-  - 监听 localhost:7321/event,接收**各个** Claude 会话的 hook 状态上报
+驻留在「插着灯的那台机器」上的后台进程:
+  - 监听 CLAUDE_LIGHT_BIND:PORT(默认 127.0.0.1:7321;多机同步时设 0.0.0.0)
+  - 接收**所有机器、所有会话**的 hook 状态上报(本机 + tailnet 上的其它机器)
   - 按会话聚合,优先级 Y > R > G:
       任一会话在等你(Y) → 黄;否则任一在推理(R) → 红;
       否则全部完成/空闲(G) → 绿;一个会话都没有 → 灭(0)
   - 把聚合结果写 USB 串口(红绿灯)
-  - 崩溃/强杀且没触发 SessionEnd 的会话,用超时清理,避免把灯永久卡红/卡黄
+  - 崩溃/强杀且没触发清理的会话,用超时剔除,避免把灯永久卡红/卡黄
+  - 安全:/event、/health 只接受本机(127/::1)和 Tailscale(100.64.0.0/10)来源
   - (保留)扫 quota、轮询中继命令、tmux 注入 —— iOS 相关,未配环境变量时自动空转
 
 零外部依赖,纯 stdlib。
 """
 
 import glob
+import ipaddress
 import json
 import os
 import sys
@@ -30,6 +33,7 @@ RELAY_URL = os.environ.get("CLAUDE_LIGHT_RELAY_URL", "").rstrip("/")
 UPDATE_SECRET = os.environ.get("CLAUDE_LIGHT_UPDATE_SECRET", "")
 COMMAND_SECRET = os.environ.get("CLAUDE_LIGHT_COMMAND_SECRET", "")
 TMUX_TARGET = os.environ.get("CLAUDE_LIGHT_TMUX_TARGET", "claude")
+LISTEN_BIND = os.environ.get("CLAUDE_LIGHT_BIND", "127.0.0.1")  # 多机同步设 0.0.0.0
 LISTEN_PORT = int(os.environ.get("CLAUDE_LIGHT_AGENT_PORT", "7321"))
 SERIAL_GLOB = os.environ.get("CLAUDE_LIGHT_SERIAL", "/dev/cu.usbmodem*")
 CLAUDE_PROJECTS_DIR = Path(os.environ.get(
@@ -38,22 +42,32 @@ CLAUDE_PROJECTS_DIR = Path(os.environ.get(
 ))
 QUOTA_INTERVAL_S = 30
 COMMAND_POLL_S = 1
-# 某会话超过这么久没再上报,视为已退出/崩溃,从聚合中剔除(防卡死)
 SESSION_STALE_S = int(os.environ.get("CLAUDE_LIGHT_SESSION_STALE_S", "600"))
-# 周期性重算灯(用于触发超时清理后的状态下降)
 LIGHT_REFRESH_S = 15
 
 # 优先级:数字大者优先。Y(等你)> R(推理)> G(完成)
 PRIORITY = {"Y": 3, "R": 2, "G": 1}
 
+# 允许的来源:本机 + Tailscale CGNAT 段
+_TAILNET = ipaddress.ip_network("100.64.0.0/10")
+
 # ---- 运行时状态 ----
 state_lock = threading.Lock()
 sessions = {}              # {session_id: {"state": "R"/"Y"/"G", "ts": float}}
 last_serial = None         # 上次写入串口的聚合值,变化时才重写
-current_quota = {}         # {tokens5h, tokens7d, updatedAt}
+current_quota = {}
 
 
-# ---- 配额计算(保留;未配中继时仅本地算,不外发)----
+def client_allowed(ip):
+    if ip in ("127.0.0.1", "::1", "localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(ip) in _TAILNET
+    except Exception:
+        return False
+
+
+# ---- 配额计算(保留;未配中继时不扫)----
 
 def parse_iso_ts(ts):
     try:
@@ -191,7 +205,7 @@ def push_state(state):
     if not RELAY_URL or not UPDATE_SECRET:
         return
     if state not in ("R", "Y", "G"):
-        return  # 中继只认 R/Y/G,'0'(灭)不外发
+        return
     body = {"state": state, "secret": UPDATE_SECRET, "quota": current_quota}
     try:
         req = urllib.request.Request(
@@ -248,10 +262,12 @@ def command_loop():
         time.sleep(COMMAND_POLL_S)
 
 
-# ---- HTTP 入口:接收各会话 hook 事件 ----
+# ---- HTTP 入口:接收各机各会话 hook 事件 ----
 
 class HookHandler(BaseHTTPRequestHandler):
     def do_POST(self):
+        if not client_allowed(self.client_address[0]):
+            self._respond(403); return
         if self.path != "/event":
             self._respond(404); return
 
@@ -265,11 +281,9 @@ class HookHandler(BaseHTTPRequestHandler):
         hook = event.get("hook") or {}
         session_id = hook.get("session_id")
 
-        # PRE(PreToolUse)只对 iOS 待批准预览有意义,这里聚合灯不用,直接 200
         if state == "PRE":
             self._respond(200); return
 
-        # 会话生命周期(可选 hook):START 注册为空闲(G),END 移除
         if state == "START":
             set_session(session_id, "G")
             refresh_light(); self._respond(200); return
@@ -285,6 +299,8 @@ class HookHandler(BaseHTTPRequestHandler):
         self._respond(200)
 
     def do_GET(self):
+        if not client_allowed(self.client_address[0]):
+            self._respond(403); return
         if self.path == "/health":
             agg = aggregate_state()
             body = json.dumps({
@@ -293,6 +309,7 @@ class HookHandler(BaseHTTPRequestHandler):
                 "sessions": summarize_sessions(),
                 "quota": current_quota,
                 "serial_glob": SERIAL_GLOB,
+                "bind": f"{LISTEN_BIND}:{LISTEN_PORT}",
                 "relay": bool(RELAY_URL),
             }).encode()
             self.send_response(200)
@@ -313,7 +330,7 @@ class HookHandler(BaseHTTPRequestHandler):
 # ---- 入口 ----
 
 def main():
-    print(f"[agent] listening on 127.0.0.1:{LISTEN_PORT}")
+    print(f"[agent] listening on {LISTEN_BIND}:{LISTEN_PORT}")
     print(f"[agent] serial glob: {SERIAL_GLOB}")
     print(f"[agent] relay: {RELAY_URL or '(not configured)'}")
     print(f"[agent] priority: Y > R > G   stale cutoff: {SESSION_STALE_S}s")
@@ -327,7 +344,7 @@ def main():
     threading.Thread(target=light_loop, daemon=True).start()
 
     # 立刻开始监听,不被初始配额扫描阻塞(launchd 下 IO 受限会拖死启动)
-    server = HTTPServer(("127.0.0.1", LISTEN_PORT), HookHandler)
+    server = HTTPServer((LISTEN_BIND, LISTEN_PORT), HookHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

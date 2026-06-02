@@ -10,7 +10,7 @@ import neopixel
 
 DATA_PIN = 15
 NUM_LEDS = 3
-BRIGHTNESS = 80   # 0-255，调亮度
+BRIGHTNESS = 120  # 0-255，调亮度
 
 RED_IDX, YELLOW_IDX, GREEN_IDX = 0, 1, 2
 
@@ -57,7 +57,7 @@ def animate(state, now):
         phase = (phase + dt / 2.0) % 1.0
         # 三角波更便宜
         f = phase * 2 if phase < 0.5 else 2 - phase * 2
-        f = 0.25 + 0.75 * f
+        f = 0.05 + 0.95 * f   # 呼吸幅度:谷底约5%、峰值100%,起伏明显
         np[RED_IDX] = scale((BRIGHTNESS, 0, 0), f)
         np[YELLOW_IDX] = (0, 0, 0)
         np[GREEN_IDX] = (0, 0, 0)

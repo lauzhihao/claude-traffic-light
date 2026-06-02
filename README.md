@@ -64,6 +64,38 @@ claude-traffic-light/
 
 排查：`curl -s localhost:7321/health`、`tail -f /tmp/claude-light-agent.log`。
 
+## 多机同步（Tailscale）
+
+让多台机器（本地 + 远程）的 Claude 状态汇到同一盏灯，靠 Tailscale 点对点直连，**不需要中转服务器**。
+
+- **插灯那台（服务端）** — 让 agent 监听 tailnet：
+  ```bash
+  CLAUDE_LIGHT_BIND=0.0.0.0 bash agent/install.sh
+  ```
+  查它的 tailscale IP：`tailscale ip -4`（当前插灯的是 macbook-pro = `100.119.112.116`）。
+
+- **新增/迁移到一台机器，让它的状态上报到灯（客户端）** — 在那台机器 `git clone` 本仓库后，跑这条（IP 换成插灯那台的 tailscale IP）：
+  ```bash
+  CLAUDE_LIGHT_AGENT_HOST=100.119.112.116 bash agent/install.sh
+  ```
+  👉 **这就是迁移到新 tailnet 机器时要跑的那条命令。** 它只配 hooks（状态经 Tailscale 发给插灯那台），不起 agent、不碰串口。`install.sh` 的 hook 合并是逐事件幂等的，老机器再跑一次只补缺失项。
+
+agent 把每台的会话分别纳入聚合，按 **🟡等你 > 🔴推理 > 🟢完成 > ⚫️无** 点灯（含 `AskUserQuestion` 提问→黄、CLAUDE.md「等 Go 授权」→黄）。
+
+## 本地优先：Tailscale 只是「边缘路径」，不阻塞主流程
+
+灯的主流程是 **本地 Claude → `127.0.0.1:7321` 的 agent → USB 串口 → 灯**，走环回（loopback），**完全不经过 Tailscale**。因此：
+
+- 插灯的机器**即使不在 Tailscale 上、或 Tailscale 断了**，本地 Claude Code / app 的状态**照样实时切灯**。
+- Tailscale 只负责把**其它机器**的状态捎过来（边缘路径）；它断开只是暂时看不到远程机器，本地灯一切照常。
+
+这由三层保障，都不依赖 Tailscale：
+1. **本地 hook 发往 `127.0.0.1`**——`CLAUDE_LIGHT_AGENT_HOST` 不设时默认就是它（插灯那台务必用**服务端模式**安装，即不带 `AGENT_HOST`）；
+2. **agent 绑 `0.0.0.0`**，没有 Tailscale 也能正常监听本地；
+3. agent 万一没在跑，`light.sh` 会**直接写串口兜底**（降级，但灯仍随本地状态切换）。
+
+> 想完全独立用（不联网、不接 Tailscale）：插灯那台直接 `bash agent/install.sh`（默认只监听本地 `127.0.0.1`）即可，无需任何 Tailscale 配置。
+
 ## 当前进度
 
 见 [TODO.md](./TODO.md)。

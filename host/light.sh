@@ -22,6 +22,19 @@ if [ ! -t 0 ]; then
   HOOK_JSON=$(cat)
 fi
 
+# smart-Stop:回合结束(G)时,若结束语是"等你授权/Go",改判为 Y(黄=等你决策)。
+# 标记可用 CLAUDE_LIGHT_WAIT_PATTERN 覆盖;取不到 transcript/没装 jq/不匹配 → 维持 G(安全退化)。
+WAIT_PATTERN="${CLAUDE_LIGHT_WAIT_PATTERN:-AWAITING AUTHORIZATION|Type .?Go.? to execute}"
+if [ "$STATE" = "G" ] && command -v jq >/dev/null 2>&1; then
+  _TRANSCRIPT=$(printf '%s' "$HOOK_JSON" | jq -r '.transcript_path // empty' 2>/dev/null)
+  if [ -n "${_TRANSCRIPT:-}" ] && [ -f "$_TRANSCRIPT" ]; then
+    _LAST=$(tail -n 400 "$_TRANSCRIPT" | jq -rs '[.[]|select(.type=="assistant").message.content[]?|select(.type=="text").text]|last // empty' 2>/dev/null || true)
+    if printf '%s' "${_LAST:-}" | grep -qiE "$WAIT_PATTERN"; then
+      STATE=Y
+    fi
+  fi
+fi
+
 PAYLOAD=$(printf '{"state":"%s","hook":%s}' "$STATE" "$HOOK_JSON")
 
 AGENT_PORT="${CLAUDE_LIGHT_AGENT_PORT:-7321}"

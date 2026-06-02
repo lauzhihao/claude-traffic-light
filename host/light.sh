@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Claude 红绿灯 hook 分发器
+#
+# 行为：
+#   1. 优先 POST 到 localhost agent（带上 hook 的完整 stdin JSON）
+#   2. agent 不在时 fallback：直推中继 + 写串口
+#
+# 用法：
+#   light.sh R    UserPromptSubmit
+#   light.sh Y    Notification
+#   light.sh G    Stop
+#   light.sh PRE  PreToolUse  ← 不改状态，只把工具信息送给 agent 暂存
+
+set -u
+
+STATE="${1:-}"
+case "$STATE" in R|Y|G|PRE) ;; *) exit 0 ;; esac
+
+# 读 hook 的 stdin JSON（Claude Code 会传 session_id / tool_name / tool_input 等）
+HOOK_JSON="{}"
+if [ ! -t 0 ]; then
+  HOOK_JSON=$(cat)
+fi
+
+PAYLOAD=$(printf '{"state":"%s","hook":%s}' "$STATE" "$HOOK_JSON")
+
+AGENT_PORT="${CLAUDE_LIGHT_AGENT_PORT:-7321}"
+if curl -sS -m 1 -X POST "http://127.0.0.1:$AGENT_PORT/event" \
+     -H "Content-Type: application/json" \
+     -d "$PAYLOAD" >/dev/null 2>&1; then
+  exit 0
+fi
+
+# Agent 不在 → fallback。PRE 只对 agent 有意义，直接退出
+[ "$STATE" = "PRE" ] && exit 0
+
+# 直推中继（后台）
+if [ -n "${CLAUDE_LIGHT_RELAY_URL:-}" ] && [ -n "${CLAUDE_LIGHT_UPDATE_SECRET:-}" ]; then
+  (curl -sS -m 2 -X POST "$CLAUDE_LIGHT_RELAY_URL/update" \
+     -H "Content-Type: application/json" \
+     -d "{\"state\":\"$STATE\",\"secret\":\"$CLAUDE_LIGHT_UPDATE_SECRET\"}" \
+     >/dev/null 2>&1) &
+fi
+
+# 写串口
+SERIAL_GLOB="${CLAUDE_LIGHT_SERIAL:-/dev/tty.usbmodem*}"
+for dev in $SERIAL_GLOB; do
+  if [ -e "$dev" ]; then
+    printf '%s' "$STATE" > "$dev" 2>/dev/null || true
+    break
+  fi
+done
+
+exit 0

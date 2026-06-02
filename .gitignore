@@ -1,0 +1,29 @@
+# Node / Cloudflare Worker
+node_modules/
+.wrangler/
+dist/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# iOS / Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcworkspace/xcuserdata/
+.swiftpm/
+
+# Secrets / local config
+.dev.vars
+*.env
+.env
+secrets.json
+
+# macOS
+.DS_Store

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd 模板：让 agent.py 开机自启 + 崩溃自动重启。
+
+  安装步骤：
+  1. 编辑下面的 ABSOLUTE_PATH_TO_REPO 改成本仓库真实路径
+  2. 编辑环境变量填入你的中继配置
+  3. 复制到 ~/Library/LaunchAgents/com.claudelight.agent.plist
+  4. 加载：
+       launchctl unload ~/Library/LaunchAgents/com.claudelight.agent.plist 2>/dev/null
+       launchctl load ~/Library/LaunchAgents/com.claudelight.agent.plist
+  5. 看日志：tail -f /tmp/claude-light-agent.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.claudelight.agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>ABSOLUTE_PATH_TO_REPO/agent/agent.py</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CLAUDE_LIGHT_RELAY_URL</key>
+    <string>https://your-worker.workers.dev</string>
+    <key>CLAUDE_LIGHT_UPDATE_SECRET</key>
+    <string>your-update-secret</string>
+    <key>CLAUDE_LIGHT_COMMAND_SECRET</key>
+    <string>your-command-secret</string>
+    <key>CLAUDE_LIGHT_TMUX_TARGET</key>
+    <string>claude</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/claude-light-agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/claude-light-agent.log</string>
+</dict>
+</plist>

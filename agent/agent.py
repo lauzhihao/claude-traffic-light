@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Claude 红绿灯 · Mac agent
+"""Claude 红绿灯 · Mac agent(多会话聚合版)
 
-驻留在 Mac 上的后台进程：
-  - 监听 localhost:7321/event，接收 hook 上报的状态事件
-  - 周期解析 ~/.claude/projects/**/conversation_*.jsonl 计算 5h/7d token 用量
-  - 把状态 + 配额 + 待批准操作 POST 到 Cloudflare 中继
-  - 轮询中继的命令队列，把 iOS 发来的 approve/deny 通过 tmux send-keys 注入到 Claude
-  - 顺手把状态字节写到 USB 串口（如果硬件红绿灯插着）
+驻留在 Mac 上的后台进程:
+  - 监听 localhost:7321/event,接收**各个** Claude 会话的 hook 状态上报
+  - 按会话聚合,优先级 Y > R > G:
+      任一会话在等你(Y) → 黄;否则任一在推理(R) → 红;
+      否则全部完成/空闲(G) → 绿;一个会话都没有 → 灭(0)
+  - 把聚合结果写 USB 串口(红绿灯)
+  - 崩溃/强杀且没触发 SessionEnd 的会话,用超时清理,避免把灯永久卡红/卡黄
+  - (保留)扫 quota、轮询中继命令、tmux 注入 —— iOS 相关,未配环境变量时自动空转
 
-零外部依赖，纯 stdlib。
+零外部依赖,纯 stdlib。
 """
 
 import glob
@@ -16,7 +18,6 @@ import json
 import os
 import sys
 import time
-import uuid
 import threading
 import subprocess
 import urllib.request
@@ -24,28 +25,35 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-# ---- 配置（环境变量）----
+# ---- 配置(环境变量)----
 RELAY_URL = os.environ.get("CLAUDE_LIGHT_RELAY_URL", "").rstrip("/")
 UPDATE_SECRET = os.environ.get("CLAUDE_LIGHT_UPDATE_SECRET", "")
 COMMAND_SECRET = os.environ.get("CLAUDE_LIGHT_COMMAND_SECRET", "")
 TMUX_TARGET = os.environ.get("CLAUDE_LIGHT_TMUX_TARGET", "claude")
 LISTEN_PORT = int(os.environ.get("CLAUDE_LIGHT_AGENT_PORT", "7321"))
-SERIAL_GLOB = os.environ.get("CLAUDE_LIGHT_SERIAL", "/dev/tty.usbmodem*")
+SERIAL_GLOB = os.environ.get("CLAUDE_LIGHT_SERIAL", "/dev/cu.usbmodem*")
 CLAUDE_PROJECTS_DIR = Path(os.environ.get(
     "CLAUDE_PROJECTS_DIR",
     str(Path.home() / ".claude" / "projects"),
 ))
 QUOTA_INTERVAL_S = 30
 COMMAND_POLL_S = 1
+# 某会话超过这么久没再上报,视为已退出/崩溃,从聚合中剔除(防卡死)
+SESSION_STALE_S = int(os.environ.get("CLAUDE_LIGHT_SESSION_STALE_S", "600"))
+# 周期性重算灯(用于触发超时清理后的状态下降)
+LIGHT_REFRESH_S = 15
+
+# 优先级:数字大者优先。Y(等你)> R(推理)> G(完成)
+PRIORITY = {"Y": 3, "R": 2, "G": 1}
 
 # ---- 运行时状态 ----
 state_lock = threading.Lock()
-current_quota = {}             # {tokens5h, tokens7d, updatedAt}
-last_tool_seen = None          # {tool, preview, ts}  from PreToolUse
-pending_request = None         # {id, tool, preview, ts}  当 state == Y 时
+sessions = {}              # {session_id: {"state": "R"/"Y"/"G", "ts": float}}
+last_serial = None         # 上次写入串口的聚合值,变化时才重写
+current_quota = {}         # {tokens5h, tokens7d, updatedAt}
 
 
-# ---- 配额计算 ----
+# ---- 配额计算(保留;未配中继时仅本地算,不外发)----
 
 def parse_iso_ts(ts):
     try:
@@ -107,23 +115,82 @@ def quota_loop():
         time.sleep(QUOTA_INTERVAL_S)
 
 
-# ---- 推送到中继 ----
+# ---- 串口输出 ----
+
+def write_serial(state):
+    for dev in glob.glob(SERIAL_GLOB):
+        try:
+            with open(dev, "wb") as f:
+                f.write(state.encode())
+            return True
+        except Exception:
+            continue
+    return False
+
+
+# ---- 会话聚合 + 刷新灯 ----
+
+def summarize_sessions():
+    with state_lock:
+        return {sid[:8]: s["state"] for sid, s in sessions.items()}
+
+
+def aggregate_state():
+    """剔除过期会话,返回 Y/R/G 聚合值;一个会话都没有则返回 '0'(灭)。"""
+    now = time.time()
+    best, best_pri = None, 0
+    with state_lock:
+        for sid in list(sessions):
+            if now - sessions[sid]["ts"] > SESSION_STALE_S:
+                del sessions[sid]
+        for s in sessions.values():
+            pri = PRIORITY.get(s["state"], 0)
+            if pri > best_pri:
+                best_pri, best = pri, s["state"]
+    return best or "0"
+
+
+def refresh_light():
+    """重算聚合,变化时才写串口(并顺手推中继,未配则空转)。"""
+    global last_serial
+    agg = aggregate_state()
+    if agg != last_serial:
+        last_serial = agg
+        write_serial(agg)
+        threading.Thread(target=push_state, args=(agg,), daemon=True).start()
+        print(f"[light] -> {agg}   sessions={summarize_sessions()}", file=sys.stderr)
+    return agg
+
+
+def light_loop():
+    while True:
+        try:
+            refresh_light()
+        except Exception as e:
+            print(f"[light_loop] {e}", file=sys.stderr)
+        time.sleep(LIGHT_REFRESH_S)
+
+
+def set_session(session_id, state):
+    sid = session_id or "default"
+    with state_lock:
+        sessions[sid] = {"state": state, "ts": time.time()}
+
+
+def drop_session(session_id):
+    sid = session_id or "default"
+    with state_lock:
+        sessions.pop(sid, None)
+
+
+# ---- 推送到中继(保留;未配 RELAY_URL/UPDATE_SECRET 时直接返回)----
 
 def push_state(state):
     if not RELAY_URL or not UPDATE_SECRET:
         return
-    with state_lock:
-        body = {
-            "state": state,
-            "secret": UPDATE_SECRET,
-            "quota": current_quota,
-        }
-        if state == "Y" and pending_request:
-            body["pending"] = {
-                "id": pending_request["id"],
-                "tool": pending_request["tool"],
-                "preview": pending_request["preview"],
-            }
+    if state not in ("R", "Y", "G"):
+        return  # 中继只认 R/Y/G,'0'(灭)不外发
+    body = {"state": state, "secret": UPDATE_SECRET, "quota": current_quota}
     try:
         req = urllib.request.Request(
             f"{RELAY_URL}/update",
@@ -137,19 +204,7 @@ def push_state(state):
         print(f"[push_state] {e}", file=sys.stderr)
 
 
-# ---- 串口输出（顺手）----
-
-def write_serial(state):
-    for dev in glob.glob(SERIAL_GLOB):
-        try:
-            with open(dev, "wb") as f:
-                f.write(state.encode())
-            return
-        except Exception:
-            continue
-
-
-# ---- tmux 命令注入 ----
+# ---- tmux 命令注入(保留;iOS 遥控批准用,未配中继时 command_loop 不启动)----
 
 def tmux_send(*keys):
     try:
@@ -162,17 +217,7 @@ def tmux_send(*keys):
 
 
 def execute_command(cmd):
-    global pending_request
     action = cmd.get("action")
-    cmd_id = cmd.get("id")
-
-    with state_lock:
-        active = pending_request
-    if active and active["id"] != cmd_id:
-        print(f"[cmd] stale {cmd_id}, current={active['id']}", file=sys.stderr)
-        return
-
-    # Claude Code 的工具批准 TUI 默认接受 y/n 或方向键，按你版本调整
     if action == "approve":
         tmux_send("y", "Enter")
     elif action == "deny":
@@ -181,11 +226,6 @@ def execute_command(cmd):
         tmux_send("Escape", "Escape")
     else:
         print(f"[cmd] unknown action {action}", file=sys.stderr)
-        return
-
-    with state_lock:
-        if pending_request and pending_request["id"] == cmd_id:
-            pending_request = None
 
 
 def command_loop():
@@ -206,22 +246,10 @@ def command_loop():
         time.sleep(COMMAND_POLL_S)
 
 
-# ---- HTTP 入口：接收 hook 事件 ----
-
-def preview_for(tool_input):
-    if isinstance(tool_input, dict):
-        # Bash 的 command 字段最常用，挑出来更友好
-        if "command" in tool_input:
-            return str(tool_input["command"])[:120]
-        if "file_path" in tool_input:
-            return str(tool_input["file_path"])[:120]
-        return json.dumps(tool_input)[:120]
-    return str(tool_input)[:120]
-
+# ---- HTTP 入口:接收各会话 hook 事件 ----
 
 class HookHandler(BaseHTTPRequestHandler):
     def do_POST(self):
-        global pending_request, last_tool_seen
         if self.path != "/event":
             self._respond(404); return
 
@@ -233,52 +261,38 @@ class HookHandler(BaseHTTPRequestHandler):
 
         state = event.get("state")
         hook = event.get("hook") or {}
+        session_id = hook.get("session_id")
 
+        # PRE(PreToolUse)只对 iOS 待批准预览有意义,这里聚合灯不用,直接 200
         if state == "PRE":
-            tool = hook.get("tool_name", "")
-            preview = preview_for(hook.get("tool_input"))
-            if tool:
-                with state_lock:
-                    last_tool_seen = {"tool": tool, "preview": preview, "ts": time.time()}
             self._respond(200); return
+
+        # 会话生命周期(可选 hook):START 注册为空闲(G),END 移除
+        if state == "START":
+            set_session(session_id, "G")
+            refresh_light(); self._respond(200); return
+        if state == "END":
+            drop_session(session_id)
+            refresh_light(); self._respond(200); return
 
         if state not in ("R", "Y", "G"):
             self._respond(400); return
 
-        with state_lock:
-            if state == "Y":
-                # 用最近一次 PreToolUse 的工具信息（30s 内有效）
-                if last_tool_seen and time.time() - last_tool_seen["ts"] < 30:
-                    pending_request = {
-                        "id": uuid.uuid4().hex[:8],
-                        "tool": last_tool_seen["tool"],
-                        "preview": last_tool_seen["preview"],
-                        "ts": time.time(),
-                    }
-                else:
-                    pending_request = {
-                        "id": uuid.uuid4().hex[:8],
-                        "tool": "input",
-                        "preview": "Claude 在等待输入",
-                        "ts": time.time(),
-                    }
-            else:
-                pending_request = None
-                last_tool_seen = None
-
-        write_serial(state)
-        threading.Thread(target=push_state, args=(state,), daemon=True).start()
+        set_session(session_id, state)
+        refresh_light()
         self._respond(200)
 
     def do_GET(self):
         if self.path == "/health":
-            with state_lock:
-                body = json.dumps({
-                    "ok": True,
-                    "quota": current_quota,
-                    "pending": pending_request,
-                    "relay": bool(RELAY_URL),
-                }).encode()
+            agg = aggregate_state()
+            body = json.dumps({
+                "ok": True,
+                "aggregate": agg,
+                "sessions": summarize_sessions(),
+                "quota": current_quota,
+                "serial_glob": SERIAL_GLOB,
+                "relay": bool(RELAY_URL),
+            }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -298,17 +312,19 @@ class HookHandler(BaseHTTPRequestHandler):
 
 def main():
     print(f"[agent] listening on 127.0.0.1:{LISTEN_PORT}")
+    print(f"[agent] serial glob: {SERIAL_GLOB}")
     print(f"[agent] relay: {RELAY_URL or '(not configured)'}")
-    print(f"[agent] tmux target: {TMUX_TARGET}")
-    print(f"[agent] claude projects dir: {CLAUDE_PROJECTS_DIR}")
+    print(f"[agent] priority: Y > R > G   stale cutoff: {SESSION_STALE_S}s")
 
-    # 启动时跑一次
     global current_quota
     current_quota = scan_quota()
-    print(f"[agent] initial quota: 5h={current_quota.get('tokens5h', 0):,}  7d={current_quota.get('tokens7d', 0):,}")
+
+    # 启动即把灯归到"无会话=灭",随后各会话上报后点亮
+    refresh_light()
 
     threading.Thread(target=quota_loop, daemon=True).start()
     threading.Thread(target=command_loop, daemon=True).start()
+    threading.Thread(target=light_loop, daemon=True).start()
 
     server = HTTPServer(("127.0.0.1", LISTEN_PORT), HookHandler)
     try:

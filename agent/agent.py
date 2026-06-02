@@ -43,7 +43,7 @@ CLAUDE_PROJECTS_DIR = Path(os.environ.get(
 QUOTA_INTERVAL_S = 30
 COMMAND_POLL_S = 1
 SESSION_STALE_S = int(os.environ.get("CLAUDE_LIGHT_SESSION_STALE_S", "600"))
-LIGHT_REFRESH_S = 15
+LIGHT_REFRESH_S = 3        # 强制重发间隔=灯拔插后最大恢复延迟;每次仅 glob+1字节串口写,开销可忽略
 
 # 优先级:数字大者优先。Y(等你)> R(推理)> G(完成)
 PRIORITY = {"Y": 3, "R": 2, "G": 1}

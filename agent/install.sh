@@ -24,27 +24,35 @@ AGENT_HOST="${CLAUDE_LIGHT_AGENT_HOST:-}"
 [ -f "$LIGHT_SH" ] || { echo "✗ 找不到 $LIGHT_SH,确认在仓库目录里运行"; exit 1; }
 chmod +x "$LIGHT_SH" "$AGENT_PY" 2>/dev/null || true
 
-# hooks 合并(两模式共用)。$1 = 命令前缀环境变量(如 CLAUDE_LIGHT_SERIAL=... / CLAUDE_LIGHT_AGENT_HOST=...)
+# hooks 合并(两模式共用)。$1 = 命令前缀(CLAUDE_LIGHT_SERIAL=... 或 CLAUDE_LIGHT_AGENT_HOST=...)
+# 逐事件幂等追加:某事件已含引用 host/light.sh 的 hook 就跳过(不重复加、保留你其它 hook)。
+# 状态映射:UserPromptSubmit→R 推理 / Notification→Y 等你 / Stop→G 完成
+#          PreToolUse(AskUserQuestion)→Y(Claude 问你=等你) / PostToolUse(同)→R(答完继续)
 merge_hooks() {
   local cmd="$1 '$LIGHT_SH'"
-  if [ -f "$SETTINGS" ] && grep -q "host/light.sh" "$SETTINGS" 2>/dev/null; then
-    echo "✓ settings.json 已含 light.sh hooks,跳过合并"
-  elif command -v jq >/dev/null 2>&1; then
-    mkdir -p "$HOME/.claude"; [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
-    cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
-    local tmp; tmp="$(mktemp)"
-    jq --arg r "$cmd R || true" --arg y "$cmd Y || true" --arg g "$cmd G || true" '
-      .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{hooks:[{type:"command",command:$r}]}]) |
-      .hooks.Notification     = ((.hooks.Notification     // []) + [{hooks:[{type:"command",command:$y}]}]) |
-      .hooks.Stop             = ((.hooks.Stop             // []) + [{hooks:[{type:"command",command:$g}]}])
-    ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
-    echo "✓ 已合并 hooks 到 $SETTINGS(原文件已备份 .bak.*)"
-  else
-    echo "⚠ 未装 jq,请手动把以下三段并进 $SETTINGS 的 \"hooks\":"
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "⚠ 未装 jq,请手动把这些并进 $SETTINGS 的 \"hooks\":"
     echo "  UserPromptSubmit → $cmd R || true"
     echo "  Notification     → $cmd Y || true"
     echo "  Stop             → $cmd G || true"
+    echo "  PreToolUse(matcher AskUserQuestion)  → $cmd Y || true"
+    echo "  PostToolUse(matcher AskUserQuestion) → $cmd R || true"
+    return
   fi
+  mkdir -p "$HOME/.claude"; [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
+  cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
+  local tmp; tmp="$(mktemp)"
+  jq --arg r "$cmd R || true" --arg y "$cmd Y || true" --arg g "$cmd G || true" '
+    def add($ev; $obj):
+      .hooks[$ev] = ((.hooks[$ev] // []) as $a
+        | if ($a | tostring | test("host/light\\.sh")) then $a else $a + [$obj] end);
+    add("UserPromptSubmit"; {hooks:[{type:"command",command:$r}]}) |
+    add("Notification";     {hooks:[{type:"command",command:$y}]}) |
+    add("Stop";             {hooks:[{type:"command",command:$g}]}) |
+    add("PreToolUse";       {matcher:"AskUserQuestion",hooks:[{type:"command",command:$y}]}) |
+    add("PostToolUse";      {matcher:"AskUserQuestion",hooks:[{type:"command",command:$r}]})
+  ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
+  echo "✓ hooks 已幂等合并到 $SETTINGS(含 AskUserQuestion→黄;原文件已备份)"
 }
 
 # ===== 客户端模式 =====

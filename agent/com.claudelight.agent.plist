@@ -2,7 +2,11 @@
 <!--
   launchd 模板：让 agent.py 开机自启 + 崩溃自动重启。
 
-  安装步骤：
+  ⭐ 推荐：直接跑  bash agent/install.sh  自动生成并加载本文件(免手动改路径)。
+     下面是手动参考。本地版只需 CLAUDE_LIGHT_SERIAL(如 /dev/cu.usbmodem*);
+     中继相关变量是可选的 iOS 增强,本地用可整段省略。
+
+  手动安装步骤：
   1. 编辑下面的 ABSOLUTE_PATH_TO_REPO 改成本仓库真实路径
   2. 编辑环境变量填入你的中继配置
   3. 复制到 ~/Library/LaunchAgents/com.claudelight.agent.plist

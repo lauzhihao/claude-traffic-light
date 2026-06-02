@@ -4,6 +4,22 @@
 
 ---
 
+## 🎉 本地版已跑通（2026-06-02 · 无 iOS）
+
+硬件到货焊好 + 接入 Claude Code，**多会话状态灯已在日常使用**：
+
+- [x] Pico 烧 MicroPython + `firmware/main.py`（USB-C RP2040 克隆板）
+- [x] 接线点亮：VCC→**3V3**（非 5V，否则数据电平喂不进）、共地、GP15 菊花链；物理顺序 红1/黄2/绿3
+- [x] 串口实时控制 R/Y/G/0 + 红呼吸/黄慢闪/绿常亮/开机自检（已调亮）
+- [x] `agent.py` 重写为**多会话聚合仲裁者**：按 `session_id` 取最高优先级 **Y>R>G** 写串口，崩溃会话超时剔除
+- [x] 全局 hooks 接入 → 一盏灯反映**所有并发会话**（🟡等你 > 🔴推理 > 🟢完成 > ⚫️无）
+- [x] launchd 开机自启（`~/Library/LaunchAgents/com.claudelight.agent.plist`）
+- [x] 一键部署脚本 `agent/install.sh`（移植新机器：clone → 跑脚本 → 插 USB）
+
+> iOS / 灵动岛 / 配额 / 云中继（Phase A–C、H）按需求**暂缓**；`agent.py` 里相关代码保留，未配环境变量时自动空转。
+
+---
+
 ## ✅ 已就绪（T1+T2 全部代码已写完）
 
 - [x] 项目骨架 + 文档（README / HARDWARE / IOS / TODO）

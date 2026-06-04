@@ -78,7 +78,10 @@ claude-traffic-light/
   ```bash
   CLAUDE_LIGHT_AGENT_HOST=100.119.112.116 bash agent/install.sh
   ```
-  👉 **这就是迁移到新 tailnet 机器时要跑的那条命令。** 它只配 hooks（状态经 Tailscale 发给插灯那台），不起 agent、不碰串口。`install.sh` 的 hook 合并是逐事件幂等的，老机器再跑一次只补缺失项。
+  👉 **这就是迁移到新 tailnet 机器时要跑的那条命令。** 它只配 hooks（状态经 Tailscale 发给插灯那台），不起 agent、不碰串口。装完会**自测**（发个临时会话到目标 agent 再查 `/health`），当场告诉你状态能不能到灯——一次抓出 IP 错 / 端口错 / 没连同一 tailnet / agent 没跑。
+
+  - **换了插灯机（灯机 IP 变了）？** 每台客户端都要把 `CLAUDE_LIGHT_AGENT_HOST` 换成新 IP 重跑本命令。重跑会**就地把旧 IP 改成新 IP**（逐事件幂等、不重复加、不动你其它 hook），不必手改 `settings.json`。
+  - **⚠ 装错用户会静默丢状态：** hooks 写进的是「跑 `install.sh` 那个用户」的 `~/.claude/settings.json`。要是你的 Claude Code 实际跑在别的用户下（远程机常见 root），就得用**那个用户**重跑本命令，否则 hooks 进了错文件、状态发不出去且全程不报错。
 
 agent 把每台的会话分别纳入聚合，按 **🟡等你 > 🔴推理 > 🟢完成 > ⚫️无** 点灯（含 `AskUserQuestion` 提问→黄、CLAUDE.md「等 Go 授权」→黄）。
 

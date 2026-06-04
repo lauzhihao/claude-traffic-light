@@ -1,5 +1,9 @@
-# Claude 红绿灯 · Pico MicroPython 固件(三灯版)
-# 串口单字节 R/Y/G/0:R=红呼吸 Y=黄快闪 G=绿常亮 0=灭
+# Claude 红绿灯 · Pico MicroPython 固件(三灯版 · 三灯同步)
+# 串口单字节 = 状态(不是颜色),三颗灯一起、同样地变:
+#   R = 推理     → 三灯黄色呼吸
+#   Y = 等你决策 → 三灯红色闪烁
+#   G = 空闲     → 三灯绿色常亮
+#   0 = 灭
 # 质感:正弦 + gamma 呼吸(渐变顺滑、低端不跳格)、状态间淡入淡出、~50fps。
 
 import sys
@@ -12,19 +16,22 @@ import neopixel
 DATA_PIN = 15
 NUM_LEDS = 3
 BRIGHTNESS = 255            # 峰值 / 常亮亮度(0-255)
-RED_IDX, YELLOW_IDX, GREEN_IDX = 0, 1, 2
 
-BREATH_PERIOD = 3.0         # 红呼吸周期(s),慢一点更从容
+BREATH_PERIOD = 3.0         # 呼吸周期(s,用于推理=黄呼吸),慢一点更从容
 BREATH_GAMMA = 2.4          # 呼吸 gamma(越大低端越柔、停留越久,像 Mac 睡眠灯)
 BREATH_FLOOR = 8            # 呼吸谷底最低 PWM(别全灭、也避开低端跳格)
-YELLOW_PERIOD = 0.7         # 黄快闪周期(s)
-YELLOW_DUTY = 0.6           # 黄亮占比
-TRANS_DUR = 0.35            # 状态切换淡入淡出时长(s)
+BLINK_PERIOD = 0.7          # 闪烁周期(s,用于等你=红闪)
+BLINK_DUTY = 0.6            # 闪烁的亮态占比
+TRANS_DUR = 0.35           # 状态切换淡入淡出时长(s)
 
-AMBER = (BRIGHTNESS, int(BRIGHTNESS * 0.5), 0)
+# R/Y/G 是“状态字节”,不是颜色。下面定义各状态对应的颜色:
+RED   = (BRIGHTNESS, 0, 0)                        # 等你决策(Y)闪烁色
+AMBER = (BRIGHTNESS, int(BRIGHTNESS * 0.5), 0)    # 推理(R)呼吸色(琥珀黄)
+GREEN = (0, BRIGHTNESS, 0)                         # 空闲(G)常亮色
+OFF   = (0, 0, 0)
 
 np = neopixel.NeoPixel(Pin(DATA_PIN), NUM_LEDS)
-disp = [(0, 0, 0)] * NUM_LEDS      # 当前实际显示色(淡入淡出的起点)
+disp = [OFF] * NUM_LEDS            # 当前实际显示色(淡入淡出的起点)
 
 
 def render(cols):
@@ -42,9 +49,15 @@ def lerp(a, b, t):
 
 
 def static_cols(s):
-    return [(BRIGHTNESS, 0, 0) if s == 'R' else (0, 0, 0),
-            AMBER if s == 'Y' else (0, 0, 0),
-            (0, BRIGHTNESS, 0) if s == 'G' else (0, 0, 0)]
+    # 三灯同色;返回各状态动画的“静态终点”(淡入淡出的落点 + G/0 的静态显示)。
+    # R 推理→黄呼吸峰值=AMBER,Y 等你→红闪亮态=RED,G 空闲→绿常亮=GREEN,其它=灭。
+    if s == 'R':
+        return [AMBER] * NUM_LEDS
+    if s == 'Y':
+        return [RED] * NUM_LEDS
+    if s == 'G':
+        return [GREEN] * NUM_LEDS
+    return [OFF] * NUM_LEDS
 
 
 def breath_pwm(ph):
@@ -53,7 +66,7 @@ def breath_pwm(ph):
     return int(BREATH_FLOOR + (BRIGHTNESS - BREATH_FLOOR) * d + 0.5)
 
 
-# 开机自检:红→黄→绿 各亮一下
+# 开机自检:三灯一起 黄→红→绿 各亮一下(顺带确认三颗都通)
 for _s in ('R', 'Y', 'G'):
     render(static_cols(_s))
     time.sleep(0.18)
@@ -76,7 +89,7 @@ while True:
             trans_from = list(disp)                # 从当前色淡入淡出到新状态
             trans_start = time.ticks_ms()
             state = ch
-            phase = 0.5 if ch == 'R' else 0.0      # 红从峰值接上过渡终点
+            phase = 0.5 if ch == 'R' else 0.0      # R(黄呼吸)从峰值 0.5 接上过渡终点
 
     now = time.ticks_ms()
     dt = time.ticks_diff(now, last) / 1000.0
@@ -91,11 +104,14 @@ while True:
             tgt = static_cols(state)
             render([lerp(trans_from[i], tgt[i], t) for i in range(NUM_LEDS)])
     elif state == 'R':
+        # 推理:三灯一起黄色呼吸(v=呼吸亮度;黄=红:绿≈2:1,v>>1 保持琥珀比例)
         phase = (phase + dt / BREATH_PERIOD) % 1.0
-        render([(breath_pwm(phase), 0, 0), (0, 0, 0), (0, 0, 0)])
+        v = breath_pwm(phase)
+        render([(v, v >> 1, 0)] * NUM_LEDS)
     elif state == 'Y':
-        phase = (phase + dt / YELLOW_PERIOD) % 1.0
-        render([(0, 0, 0), AMBER if phase < YELLOW_DUTY else (0, 0, 0), (0, 0, 0)])
-    # G / 0:静态,过渡末已渲染,保持不动
+        # 等你决策:三灯一起红色方波闪烁
+        phase = (phase + dt / BLINK_PERIOD) % 1.0
+        render([(RED if phase < BLINK_DUTY else OFF)] * NUM_LEDS)
+    # G(空闲=绿常亮)/ 0(灭):静态,过渡末已渲染,保持不动
 
     time.sleep_ms(20)

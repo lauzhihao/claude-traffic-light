@@ -41,6 +41,7 @@ merge_hooks() {
     echo "  UserPromptSubmit → $cmd R || true"
     echo "  Notification     → $cmd Y || true"
     echo "  Stop             → $cmd G || true"
+    echo "  SessionEnd       → $cmd END || true"
     echo "  PreToolUse(matcher AskUserQuestion)  → $cmd Y || true"
     echo "  PostToolUse(matcher AskUserQuestion) → $cmd R || true"
     echo "  PreToolUse(matcher \"\" 所有工具)   → $cmd PING || true"
@@ -50,7 +51,7 @@ merge_hooks() {
   mkdir -p "$HOME/.claude"; [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
   cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
   local tmp; tmp="$(mktemp)"
-  jq --arg r "$cmd R || true" --arg y "$cmd Y || true" --arg g "$cmd G || true" --arg p "$cmd PING || true" \
+  jq --arg r "$cmd R || true" --arg y "$cmd Y || true" --arg g "$cmd G || true" --arg p "$cmd PING || true" --arg e "$cmd END || true" \
      --arg var_re "$varname='[^']*'" --arg newpfx "$newpfx" '
     # ① 就地更新:遍历整棵树,把 light hook 命令里旧的 env 前缀(VARNAME=..)gsub 成本次的值。
     #    只动 .command 是字符串且含 host/light.sh 的节点;别的 hook 一律不碰。
@@ -71,6 +72,7 @@ merge_hooks() {
     add("UserPromptSubmit"; {hooks:[{type:"command",command:$r}]}; "host/light.sh") |
     add("Notification";     {hooks:[{type:"command",command:$y}]}; "host/light.sh") |
     add("Stop";             {hooks:[{type:"command",command:$g}]}; "host/light.sh") |
+    add("SessionEnd";       {hooks:[{type:"command",command:$e}]}; "host/light.sh") |
     add("PreToolUse";       {matcher:"AskUserQuestion",hooks:[{type:"command",command:$y}]}; "AskUserQuestion") |
     add("PostToolUse";      {matcher:"AskUserQuestion",hooks:[{type:"command",command:$r}]}; "AskUserQuestion") |
     add("PreToolUse";       {matcher:"",hooks:[{type:"command",command:$p}]}; "PING || true") |

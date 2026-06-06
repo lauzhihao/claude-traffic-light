@@ -24,6 +24,8 @@ xcuserdata/
 *.env
 .env
 secrets.json
+# 本机白名单配置(含具体 tailscale IP);仓库只放 agent/config.example.json
+agent/config.json
 
 # macOS
 .DS_Store

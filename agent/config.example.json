@@ -1,0 +1,8 @@
+{
+  "_comment": "复制本文件为 ~/.config/claude-traffic-light/config.json 并填上你自己的 tailscale IP。master=插灯/亮灯的机器(agent 跑这台);slaves=允许上报状态的远程机器 IP 白名单(只接收这些)。本机状态走 127 无需列;不在 slaves 里的机器自动屏蔽。改完重启 agent:launchctl unload/load ~/Library/LaunchAgents/com.claudelight.agent.plist。没有此文件时 agent 回退为接收整个 tailnet。",
+  "master": "100.64.0.1",
+  "slaves": [
+    "100.64.0.2",
+    "100.64.0.3"
+  ]
+}

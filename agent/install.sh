@@ -189,6 +189,28 @@ else
 fi
 
 merge_hooks "CLAUDE_LIGHT_SERIAL='$SERIAL'"
+
+# 生成 master/slaves 白名单配置(若不存在):master=本机 tailscale IP、slaves 留空待你填。
+# agent 默认读 ~/.config/claude-traffic-light/config.json;配了就只接收 本机+master+slaves,
+# 没配则回退接收整个 tailnet。想取消白名单直接删掉此文件即可。
+CONFIG_DIR="$HOME/.config/claude-traffic-light"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+if [ ! -f "$CONFIG_FILE" ]; then
+  mkdir -p "$CONFIG_DIR"
+  MYIP="$( (command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null | head -1) || true)"
+  [ -n "$MYIP" ] || MYIP="100.x.x.x"
+  cat > "$CONFIG_FILE" <<JSON
+{
+  "master": "$MYIP",
+  "slaves": []
+}
+JSON
+  echo "✓ 已生成白名单配置 $CONFIG_FILE(master=$MYIP, slaves=[])"
+  echo "  → 把要接收状态的远程机 tailscale IP 加进 slaves,再 launchctl unload/load 重启 agent 生效。"
+else
+  echo "✓ 白名单配置已存在 $CONFIG_FILE(slaves 决定接收哪些远程机;改完重启 agent 生效)"
+fi
+
 echo ""
 echo "完成!插上红绿灯 USB,在 Claude Code 里聊一句就会动。"
 echo "  健康检查: curl -s localhost:$PORT/health"

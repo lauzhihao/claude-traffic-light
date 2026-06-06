@@ -85,6 +85,18 @@ claude-traffic-light/
 
 agent 把每台的会话分别纳入聚合，按 **🟡等你 > 🔴推理 > 🟢完成 > ⚫️无** 点灯（含 `AskUserQuestion` 提问→黄、CLAUDE.md「等 Go 授权」→黄）。
 
+### 只接收指定机器（白名单 · master/slaves）
+
+默认 agent 接收**整个 tailnet** 上所有机器的状态。若某台机器你不想让它的 Claude 干扰这盏灯（比如转给同事用了），用**配置文件白名单**精确控制接收谁。插灯那台编辑 `~/.config/claude-traffic-light/config.json`（`install.sh` 服务端模式会生成骨架，也可从 [`agent/config.example.json`](agent/config.example.json) 复制）：
+
+```json
+{ "master": "100.119.112.116", "slaves": ["100.83.163.41"] }
+```
+
+- `master` = 插灯/亮灯的机器（agent 跑这台）；`slaves` = **允许上报状态的远程机器 IP 白名单**——agent 只接收 `127`（本机）+ `master` + `slaves`，不在 `slaves` 里的机器一律 **403 拒绝、不进聚合**。
+- 加一台：往 `slaves` 添 IP；不接收某台：从 `slaves` 删掉。改完 `launchctl unload/load` 重启 agent 生效；`curl -s localhost:7321/health` 的 `peers` 字段看当前白名单。
+- **删掉此文件 = 回退**到“接收整个 tailnet”（向后兼容）。
+
 ## 本地优先：Tailscale 只是「边缘路径」，不阻塞主流程
 
 灯的主流程是 **本地 Claude → `127.0.0.1:7321` 的 agent → USB 串口 → 灯**，走环回（loopback），**完全不经过 Tailscale**。因此：

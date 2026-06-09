@@ -38,14 +38,7 @@ public struct DenyIntent: LiveActivityIntent {
 
 enum RelayCommand {
     static func send(id: String, action: String) async {
-        let defaults = UserDefaults.standard
-        guard
-            let relayUrl = defaults.string(forKey: "relayUrl"),
-            !relayUrl.isEmpty,
-            let commandSecret = defaults.string(forKey: "commandSecret"),
-            !commandSecret.isEmpty,
-            let url = URL(string: "\(relayUrl)/command")
-        else { return }
+        guard let url = URL(string: "\(RelayConfig.url)/command") else { return }
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -53,7 +46,7 @@ enum RelayCommand {
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "id": id,
             "action": action,
-            "secret": commandSecret,
+            "secret": RelayConfig.commandSecret,
         ])
         req.timeoutInterval = 5
         _ = try? await URLSession.shared.data(for: req)

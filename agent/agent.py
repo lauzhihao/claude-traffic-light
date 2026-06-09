@@ -32,6 +32,9 @@ from pathlib import Path
 RELAY_URL = os.environ.get("CLAUDE_LIGHT_RELAY_URL", "").rstrip("/")
 UPDATE_SECRET = os.environ.get("CLAUDE_LIGHT_UPDATE_SECRET", "")
 COMMAND_SECRET = os.environ.get("CLAUDE_LIGHT_COMMAND_SECRET", "")
+# Cloudflare 默认 UA 'Python-urllib/x' 会被边缘 WAF 当机器人直接 403,
+# 给中继请求带个正常 UA 绕过(curl 能过就是因为 UA 不同)。
+HTTP_USER_AGENT = "claude-traffic-light-agent/1.0"
 TMUX_TARGET = os.environ.get("CLAUDE_LIGHT_TMUX_TARGET", "claude")
 LISTEN_BIND = os.environ.get("CLAUDE_LIGHT_BIND", "127.0.0.1")  # 多机同步设 0.0.0.0
 LISTEN_PORT = int(os.environ.get("CLAUDE_LIGHT_AGENT_PORT", "7321"))
@@ -235,7 +238,7 @@ def push_state(state):
         req = urllib.request.Request(
             f"{RELAY_URL}/update",
             data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "User-Agent": HTTP_USER_AGENT},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=3) as resp:
@@ -275,6 +278,7 @@ def command_loop():
         try:
             req = urllib.request.Request(
                 f"{RELAY_URL}/commands?secret={COMMAND_SECRET}",
+                headers={"User-Agent": HTTP_USER_AGENT},
                 method="GET",
             )
             with urllib.request.urlopen(req, timeout=5) as resp:

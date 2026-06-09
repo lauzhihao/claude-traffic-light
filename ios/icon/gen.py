@@ -27,7 +27,7 @@ def rays(cx, cy, n, r0, w, color, base, amp, phase_deg):
 
 def build(mirror=True):
     S=1024; cx=cy=S/2
-    star = rays(cx, cy, 12, 22, 44, "#F4EEE2", base=246, amp=64, phase_deg=35)
+    star = rays(cx, cy, 12, 24, 52, "#F4EEE2", base=316, amp=80, phase_deg=35)
     if mirror:   # 水平镜像(关于 x=512),和 Claude 原标朝向相反
         star = f'<g transform="translate({S},0) scale(-1,1)">{star}</g>'
     return "\n".join([

@@ -3,10 +3,13 @@ import ActivityKit
 
 // 配置已写死在 RelayConfig,App 打开即自动同步——没有任何要填的字段。
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var activity: Activity<ClaudeAttributes>?
     @State private var state: String = "G"
     @State private var status: String = "正在连接中继…"
     @State private var lastUpdate: Date?
+    @State private var didSync = false
 
     var body: some View {
         VStack(spacing: 22) {
@@ -51,19 +54,28 @@ struct ContentView: View {
                 .foregroundStyle(.tertiary)
         }
         .padding()
-        .task { await bootstrap() }
+        // ⚠️ Activity.request 必须在前台 active 时调用,否则抛 "Target is not foreground"。
+        //    所以把自动同步挂到 scenePhase 上:每次回到 active 且还没同步过就启动。
+        .task(id: scenePhase) {
+            if scenePhase == .active && !didSync {
+                await bootstrap()
+            }
+        }
     }
 
-    // 开屏即自动同步:已有 Live Activity 就接管,没有就新建一个。
+    // 自动同步:已有 Live Activity 就接管,没有就新建一个。
     @MainActor
     func bootstrap() async {
         await fetchLatest()   // 先从中继拿一次当前状态,App 一打开就显示对的颜色
         if let existing = Activity<ClaudeAttributes>.activities.first {
-            activity = existing
-            state = existing.content.state.state
-            lastUpdate = existing.content.state.updatedAt
+            if activity == nil {
+                activity = existing
+                state = existing.content.state.state
+                lastUpdate = existing.content.state.updatedAt
+                observe(existing)
+            }
             status = "已同步 ✓ 灵动岛会自动更新"
-            observe(existing)
+            didSync = true
         } else {
             await start()
         }
@@ -75,19 +87,26 @@ struct ContentView: View {
             status = "请在 设置 → ClaudeTrafficLight 打开「实时活动」后重开 App"
             return
         }
-        do {
-            let initial = ClaudeAttributes.ContentState(state: state, updatedAt: .now)
-            let act = try Activity.request(
-                attributes: ClaudeAttributes(name: "Claude Code"),
-                content: .init(state: initial, staleDate: nil),
-                pushType: .token
-            )
-            activity = act
-            status = "已启动,正在注册推送…"
-            observe(act)
-        } catch {
-            status = "启动失败:\(error.localizedDescription)"
+        let initial = ClaudeAttributes.ContentState(state: state, updatedAt: .now)
+        // 冷启动那一刻可能还没真正进入前台 → request 抛 "not foreground";短重试兜底。
+        for attempt in 1...6 {
+            do {
+                let act = try Activity.request(
+                    attributes: ClaudeAttributes(name: "Claude Code"),
+                    content: .init(state: initial, staleDate: nil),
+                    pushType: .token
+                )
+                activity = act
+                didSync = true
+                status = "已启动,正在注册推送…"
+                observe(act)
+                return
+            } catch {
+                status = "正在启动…(\(attempt)/6)"
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
         }
+        status = "启动失败,请点下方「重新连接」"
     }
 
     // 同时监听:① push token(自动注册到中继)② 内容更新(刷新 App 里的灯)

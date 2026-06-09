@@ -5,5 +5,6 @@ import SwiftUI
 struct ClaudeTrafficLightWidgetBundle: WidgetBundle {
     var body: some Widget {
         ClaudeLiveActivity()
+        StatusIconWidget()
     }
 }

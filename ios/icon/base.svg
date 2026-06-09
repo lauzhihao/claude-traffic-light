@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+  <radialGradient id="bg" cx="40%" cy="34%" r="80%">
+    <stop offset="0%"  stop-color="#E68A64"/>
+    <stop offset="55%" stop-color="#CF6A43"/>
+    <stop offset="100%" stop-color="#B44E2E"/>
+  </radialGradient>
+  <radialGradient id="dotG" cx="38%" cy="32%" r="78%">
+    <stop offset="0%" stop-color="#63E98A"/>
+    <stop offset="100%" stop-color="#1BA046"/>
+  </radialGradient>
+  <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+    <feGaussianBlur stdDeviation="22" result="b"/>
+    <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+  </filter>
+  <filter id="ss" x="-50%" y="-50%" width="200%" height="200%">
+    <feDropShadow dx="0" dy="9" stdDeviation="16" flood-color="#39140a" flood-opacity="0.25"/>
+  </filter>
+</defs>
+<rect width="1024" height="1024" fill="url(#bg)"/>
+<g filter="url(#ss)">
+<rect x="489.0" y="212.0" width="46.0" height="276.0" rx="23.0" fill="#F5EFE4" transform="rotate(0.00 512.0 512.0)"/>
+<rect x="489.0" y="286.0" width="46.0" height="202.0" rx="23.0" fill="#F5EFE4" transform="rotate(30.00 512.0 512.0)"/>
+<rect x="489.0" y="212.0" width="46.0" height="276.0" rx="23.0" fill="#F5EFE4" transform="rotate(60.00 512.0 512.0)"/>
+<rect x="489.0" y="286.0" width="46.0" height="202.0" rx="23.0" fill="#F5EFE4" transform="rotate(90.00 512.0 512.0)"/>
+<rect x="489.0" y="212.0" width="46.0" height="276.0" rx="23.0" fill="#F5EFE4" transform="rotate(120.00 512.0 512.0)"/>
+<rect x="489.0" y="286.0" width="46.0" height="202.0" rx="23.0" fill="#F5EFE4" transform="rotate(150.00 512.0 512.0)"/>
+<rect x="489.0" y="212.0" width="46.0" height="276.0" rx="23.0" fill="#F5EFE4" transform="rotate(180.00 512.0 512.0)"/>
+<rect x="489.0" y="286.0" width="46.0" height="202.0" rx="23.0" fill="#F5EFE4" transform="rotate(210.00 512.0 512.0)"/>
+<rect x="489.0" y="212.0" width="46.0" height="276.0" rx="23.0" fill="#F5EFE4" transform="rotate(240.00 512.0 512.0)"/>
+<rect x="489.0" y="286.0" width="46.0" height="202.0" rx="23.0" fill="#F5EFE4" transform="rotate(270.00 512.0 512.0)"/>
+<rect x="489.0" y="212.0" width="46.0" height="276.0" rx="23.0" fill="#F5EFE4" transform="rotate(300.00 512.0 512.0)"/>
+<rect x="489.0" y="286.0" width="46.0" height="202.0" rx="23.0" fill="#F5EFE4" transform="rotate(330.00 512.0 512.0)"/>
+<circle cx="512.0" cy="512.0" r="28.5" fill="#F5EFE4"/>
+</g>
+</svg>

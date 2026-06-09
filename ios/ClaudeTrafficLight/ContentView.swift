@@ -1,80 +1,84 @@
 import SwiftUI
 import ActivityKit
 
-// 配置已写死在 RelayConfig,App 打开即自动同步——没有任何要填的字段。
+// 配色:主色调 Claude 土黄,强调色橙
+extension Color {
+    static let ctTan    = Color(red: 0.91, green: 0.85, blue: 0.74)  // 土黄背景
+    static let ctInk    = Color(red: 0.26, green: 0.19, blue: 0.13)  // 深棕文字
+    static let ctOrange = Color(red: 0.85, green: 0.45, blue: 0.18)  // 橙色强调/按钮
+    static let ctHousing = Color(red: 0.16, green: 0.13, blue: 0.11) // 灯壳深色
+}
+
+// 配置已写死在 RelayConfig,App 打开即自动同步。
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var activity: Activity<ClaudeAttributes>?
     @State private var state: String = "G"
-    @State private var status: String = "正在连接中继…"
-    @State private var lastUpdate: Date?
+    @State private var quota5h: Int?
+    @State private var quota7d: Int?
+    @State private var status: String = ""
     @State private var didSync = false
 
     var body: some View {
-        VStack(spacing: 22) {
-            Spacer()
+        ZStack {
+            Color.ctTan.ignoresSafeArea()
 
-            Text("Claude 红绿灯")
-                .font(.largeTitle.bold())
+            VStack(spacing: 28) {
+                // 横版红绿灯:置顶居中
+                HorizontalTrafficLight(state: state)
+                    .padding(.top, 12)
 
-            BigTrafficLight(state: state)
+                Text(stateLabelLocal(state))
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(stateColorLocal(state))
+                    .contentTransition(.opacity)
 
-            Text(stateLabelLocal(state))
-                .font(.title2.bold())
-                .foregroundStyle(stateColorLocal(state))
-                .contentTransition(.opacity)
+                // Claude 用量
+                QuotaCard(t5h: quota5h, t7d: quota7d)
 
-            VStack(spacing: 4) {
-                Text(status)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                if let lastUpdate {
-                    Text("更新于 \(lastUpdate.formatted(date: .omitted, time: .standard))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                if !status.isEmpty {
+                    Text(status)
+                        .font(.footnote)
+                        .foregroundStyle(.ctInk.opacity(0.55))
+                        .multilineTextAlignment(.center)
+                }
+
+                Spacer()
+
+                if activity == nil {
+                    Button {
+                        Task { await start() }
+                    } label: {
+                        Label("重新连接", systemImage: "arrow.clockwise")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.ctOrange)
+                    .controlSize(.large)
                 }
             }
-
-            Spacer()
-
-            if activity == nil {
-                Button {
-                    Task { await start() }
-                } label: {
-                    Label("重新连接", systemImage: "arrow.clockwise")
-                        .font(.headline)
-                }
-                .buttonStyle(.borderedProminent)
-            }
-
-            Text(RelayConfig.url.replacingOccurrences(of: "https://", with: ""))
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            .padding(.horizontal, 24)
+            .padding(.bottom, 20)
+            .foregroundStyle(.ctInk)
         }
-        .padding()
-        // ⚠️ Activity.request 必须在前台 active 时调用,否则抛 "Target is not foreground"。
-        //    所以把自动同步挂到 scenePhase 上:每次回到 active 且还没同步过就启动。
         .task(id: scenePhase) {
-            if scenePhase == .active && !didSync {
-                await bootstrap()
-            }
+            if scenePhase == .active && !didSync { await bootstrap() }
         }
     }
 
-    // 自动同步:已有 Live Activity 就接管,没有就新建一个。
+    // MARK: - 同步逻辑
+
     @MainActor
     func bootstrap() async {
-        await fetchLatest()   // 先从中继拿一次当前状态,App 一打开就显示对的颜色
+        await fetchLatest()
         if let existing = Activity<ClaudeAttributes>.activities.first {
             if activity == nil {
                 activity = existing
-                state = existing.content.state.state
-                lastUpdate = existing.content.state.updatedAt
+                apply(existing.content.state)
                 observe(existing)
             }
-            status = "已同步 ✓ 灵动岛会自动更新"
             didSync = true
         } else {
             await start()
@@ -88,7 +92,6 @@ struct ContentView: View {
             return
         }
         let initial = ClaudeAttributes.ContentState(state: state, updatedAt: .now)
-        // 冷启动那一刻可能还没真正进入前台 → request 抛 "not foreground";短重试兜底。
         for attempt in 1...6 {
             do {
                 let act = try Activity.request(
@@ -98,7 +101,7 @@ struct ContentView: View {
                 )
                 activity = act
                 didSync = true
-                status = "已启动,正在注册推送…"
+                status = ""
                 observe(act)
                 return
             } catch {
@@ -109,7 +112,6 @@ struct ContentView: View {
         status = "启动失败,请点下方「重新连接」"
     }
 
-    // 同时监听:① push token(自动注册到中继)② 内容更新(刷新 App 里的灯)
     func observe(_ act: Activity<ClaudeAttributes>) {
         Task {
             for await tokenData in act.pushTokenUpdates {
@@ -119,12 +121,15 @@ struct ContentView: View {
         }
         Task {
             for await content in act.contentUpdates {
-                await MainActor.run {
-                    withAnimation { state = content.state.state }
-                    lastUpdate = content.state.updatedAt
-                }
+                await MainActor.run { apply(content.state) }
             }
         }
+    }
+
+    @MainActor
+    func apply(_ cs: ClaudeAttributes.ContentState) {
+        withAnimation { state = cs.state }
+        if let q = cs.quota { quota5h = q.tokens5h; quota7d = q.tokens7d }
     }
 
     func register(token: String) async {
@@ -139,69 +144,115 @@ struct ContentView: View {
         do {
             let (_, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            await MainActor.run {
-                status = code == 200
-                    ? "已同步 ✓ 灵动岛会自动更新"
-                    : "注册失败 HTTP \(code)"
-            }
+            await MainActor.run { status = code == 200 ? "" : "注册失败 HTTP \(code)" }
         } catch {
             await MainActor.run { status = "注册请求失败:\(error.localizedDescription)" }
         }
     }
 
-    // best-effort:从中继 /health 读一次当前状态,失败就静默(纯锦上添花)。
+    // best-effort:从中继 /health 读当前状态 + 用量
     func fetchLatest() async {
         guard let url = URL(string: "\(RelayConfig.url)/health") else { return }
         guard
             let (data, _) = try? await URLSession.shared.data(from: url),
             let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let latest = obj["latest"] as? [String: Any],
-            let s = latest["state"] as? String
+            let latest = obj["latest"] as? [String: Any]
         else { return }
-        await MainActor.run { withAnimation { state = s } }
+        await MainActor.run {
+            if let s = latest["state"] as? String { withAnimation { state = s } }
+            if let q = latest["quota"] as? [String: Any] {
+                quota5h = q["tokens5h"] as? Int
+                quota7d = q["tokens7d"] as? Int
+            }
+        }
     }
 }
 
-// MARK: - App 内的大红绿灯
+// MARK: - 横版红绿灯(置顶)
 
-struct BigTrafficLight: View {
+struct HorizontalTrafficLight: View {
     let state: String
 
     var body: some View {
-        VStack(spacing: 18) {
-            bulb(.red, on: state == "R")
+        HStack(spacing: 20) {
+            bulb(.red,    on: state == "R")
             bulb(.yellow, on: state == "Y")
-            bulb(.green, on: state == "G")
+            bulb(.green,  on: state == "G")
         }
-        .padding(26)
-        .background(Color.black.opacity(0.88))
-        .clipShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
+        .padding(.horizontal, 28)
+        .padding(.vertical, 18)
+        .background(Color.ctHousing)
+        .clipShape(Capsule())
+        .shadow(color: .black.opacity(0.18), radius: 10, y: 6)
     }
 
     func bulb(_ c: Color, on: Bool) -> some View {
         Circle()
-            .fill(on ? c : c.opacity(0.14))
-            .frame(width: 76, height: 76)
-            .shadow(color: on ? c : .clear, radius: on ? 26 : 0)
+            .fill(on ? c : c.opacity(0.15))
+            .frame(width: 56, height: 56)
+            .overlay(Circle().stroke(.white.opacity(on ? 0.28 : 0.06), lineWidth: 1.5))
+            .shadow(color: on ? c.opacity(0.9) : .clear, radius: on ? 16 : 0)
             .animation(.easeInOut(duration: 0.25), value: on)
     }
+}
+
+// MARK: - 用量卡
+
+struct QuotaCard: View {
+    let t5h: Int?
+    let t7d: Int?
+
+    var body: some View {
+        HStack(spacing: 0) {
+            cell("近 5 小时", t5h)
+            Rectangle().fill(.ctInk.opacity(0.12)).frame(width: 1, height: 46)
+            cell("近 7 天", t7d)
+        }
+        .padding(.vertical, 18)
+        .frame(maxWidth: .infinity)
+        .background(.white.opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(.ctInk.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    func cell(_ title: String, _ v: Int?) -> some View {
+        VStack(spacing: 5) {
+            Text(v.map(fmtTokens) ?? "—")
+                .font(.system(.title, design: .rounded).weight(.bold))
+                .monospacedDigit()
+                .foregroundStyle(.ctOrange)
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.ctInk.opacity(0.6))
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+func fmtTokens(_ n: Int) -> String {
+    if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+    if n >= 1_000 { return String(format: "%.0fK", Double(n) / 1_000) }
+    return "\(n)"
 }
 
 func stateColorLocal(_ s: String) -> Color {
     switch s {
     case "R": return .red
-    case "Y": return .yellow
-    case "G": return .green
-    default: return .gray
+    case "Y": return Color(red: 0.85, green: 0.6, blue: 0.0)  // 土黄底上加深的黄,保证对比
+    case "G": return Color(red: 0.13, green: 0.55, blue: 0.23)
+    default:  return .gray
     }
 }
 
 func stateLabelLocal(_ s: String) -> String {
     switch s {
-    case "R": return "thinking · 推理中"
-    case "Y": return "waiting · 等你"
-    case "G": return "ready · 就绪"
-    default: return "—"
+    case "R": return "推理中 · thinking"
+    case "Y": return "等你 · waiting"
+    case "G": return "就绪 · ready"
+    default:  return "—"
     }
 }
 

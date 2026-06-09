@@ -36,7 +36,7 @@ struct ContentView: View {
                 if !status.isEmpty {
                     Text(status)
                         .font(.footnote)
-                        .foregroundStyle(.ctInk.opacity(0.55))
+                        .foregroundStyle(Color.ctInk.opacity(0.55))
                         .multilineTextAlignment(.center)
                 }
 
@@ -52,14 +52,14 @@ struct ContentView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.ctOrange)
+                    .tint(Color.ctOrange)
                     .controlSize(.large)
                 }
             }
             .padding(.horizontal, 24)
             .padding(.top, 12)
             .padding(.bottom, 20)
-            .foregroundStyle(.ctInk)
+            .foregroundStyle(Color.ctInk)
         }
         .task(id: scenePhase) {
             if scenePhase == .active && !didSync { await bootstrap() }

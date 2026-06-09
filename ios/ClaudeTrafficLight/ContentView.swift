@@ -183,20 +183,21 @@ struct HorizontalTrafficLight: View {
     }
 }
 
+// 文案颜色与灯的纯色保持一致(红/黄/绿)
 func stateColorLocal(_ s: String) -> Color {
     switch s {
     case "R": return .red
-    case "Y": return Color(red: 0.85, green: 0.6, blue: 0.0)
-    case "G": return Color(red: 0.13, green: 0.55, blue: 0.23)
+    case "Y": return .yellow
+    case "G": return .green
     default:  return .gray
     }
 }
 
 func stateLabelLocal(_ s: String) -> String {
     switch s {
-    case "R": return "推理中 · thinking"
-    case "Y": return "等你 · waiting"
-    case "G": return "就绪 · ready"
+    case "R": return "推理中"
+    case "Y": return "等待决策"
+    case "G": return "空闲"
     default:  return "—"
     }
 }

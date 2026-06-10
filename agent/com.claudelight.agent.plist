@@ -4,11 +4,16 @@
 
   ⭐ 推荐：直接跑  bash agent/install.sh  自动生成并加载本文件(免手动改路径)。
      下面是手动参考。本地版只需 CLAUDE_LIGHT_SERIAL(如 /dev/cu.usbmodem*);
-     中继相关变量是可选的 iOS 增强,本地用可整段省略。
+     APNS 相关变量是可选的 iOS 增强,不用 iOS 推送可整段省略
+     (此时 ProgramArguments 用系统 python3 即可,无外部依赖)。
 
+  iOS 推送(本地 APNs 直推,无需 Cloudflare/代理):
+  0. 准备依赖与私钥:
+       uv venv agent/.venv && uv pip install --python agent/.venv/bin/python "httpx[http2]" cryptography
+       .p8 私钥放稳定路径(如 ~/.claude-light/),Apple Developer 后台生成
   手动安装步骤：
   1. 编辑下面的 ABSOLUTE_PATH_TO_REPO 改成本仓库真实路径
-  2. 编辑环境变量填入你的中继配置
+  2. 编辑环境变量填入你的 APNs 配置
   3. 复制到 ~/Library/LaunchAgents/com.claudelight.agent.plist
   4. 加载：
        launchctl unload ~/Library/LaunchAgents/com.claudelight.agent.plist 2>/dev/null
@@ -21,24 +26,36 @@
   <key>Label</key>
   <string>com.claudelight.agent</string>
 
+  <!-- iOS 推送需要 agent/.venv(httpx[http2]+cryptography);纯本地灯改用 /usr/bin/python3 -->
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
+    <string>ABSOLUTE_PATH_TO_REPO/agent/.venv/bin/python</string>
     <string>ABSOLUTE_PATH_TO_REPO/agent/agent.py</string>
   </array>
 
   <key>EnvironmentVariables</key>
   <dict>
-    <key>CLAUDE_LIGHT_RELAY_URL</key>
-    <string>https://your-worker.workers.dev</string>
-    <key>CLAUDE_LIGHT_UPDATE_SECRET</key>
-    <string>your-update-secret</string>
-    <key>CLAUDE_LIGHT_COMMAND_SECRET</key>
-    <string>your-command-secret</string>
-    <key>CLAUDE_LIGHT_TMUX_TARGET</key>
-    <string>claude</string>
+    <key>CLAUDE_LIGHT_SERIAL</key>
+    <string>/dev/cu.usbmodem*</string>
+
+    <!-- iOS 推送(可选):agent 内置 APNs 中继,手机 POST /register 注册 -->
+    <key>CLAUDE_LIGHT_REGISTER_SECRET</key>
+    <string>your-register-secret</string>
+    <key>CLAUDE_LIGHT_APNS_P8</key>
+    <string>/Users/you/.claude-light/AuthKey_XXXXXXXXXX.p8</string>
+    <key>CLAUDE_LIGHT_APNS_KEY_ID</key>
+    <string>XXXXXXXXXX</string>
+    <key>CLAUDE_LIGHT_APNS_TEAM_ID</key>
+    <string>XXXXXXXXXX</string>
+    <key>CLAUDE_LIGHT_APNS_BUNDLE_ID</key>
+    <string>com.yourname.claudetrafficlight</string>
+    <key>CLAUDE_LIGHT_APNS_ENV</key>
+    <string>development</string>
+
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
   </dict>
 
   <key>RunAtLoad</key>

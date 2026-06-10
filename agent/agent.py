@@ -9,10 +9,13 @@
       否则全部完成/空闲(G) → 绿;一个会话都没有 → 灭(0)
   - 把聚合结果写 USB 串口(红绿灯)
   - 崩溃/强杀且没触发清理的会话,用超时剔除,避免把灯永久卡红/卡黄
-  - 安全:/event、/health 只接受本机(127/::1)和 Tailscale(100.64.0.0/10)来源
-  - (保留)扫 quota、轮询中继命令、tmux 注入 —— iOS 相关,未配环境变量时自动空转
+  - 安全:/event 只接受本机(127/::1)和 Tailscale(100.64.0.0/10)来源;
+    /register(有 secret)和 /health(只读)额外放行私网段,手机经家庭 Wi-Fi 可达
+  - iOS 推送:内置 APNs 中继(apns.py)——手机 POST /register 注册 Live Activity
+    token,状态变化直推 Apple,不再绕道 Cloudflare(也就不再依赖本地代理)。
+    未配 APNS 环境变量/缺依赖时推送自动空转,纯本地灯不受影响。
 
-零外部依赖,纯 stdlib。
+核心纯 stdlib;仅 iOS 推送需要 agent/.venv(httpx[http2] + cryptography),见 apns.py。
 """
 
 import glob
@@ -22,17 +25,14 @@ import os
 import sys
 import time
 import threading
-import subprocess
-import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import apns
+
 # ---- 配置(环境变量)----
-RELAY_URL = os.environ.get("CLAUDE_LIGHT_RELAY_URL", "").rstrip("/")
-UPDATE_SECRET = os.environ.get("CLAUDE_LIGHT_UPDATE_SECRET", "")
-COMMAND_SECRET = os.environ.get("CLAUDE_LIGHT_COMMAND_SECRET", "")
-TMUX_TARGET = os.environ.get("CLAUDE_LIGHT_TMUX_TARGET", "claude")
+REGISTER_SECRET = os.environ.get("CLAUDE_LIGHT_REGISTER_SECRET", "")
 LISTEN_BIND = os.environ.get("CLAUDE_LIGHT_BIND", "127.0.0.1")  # 多机同步设 0.0.0.0
 LISTEN_PORT = int(os.environ.get("CLAUDE_LIGHT_AGENT_PORT", "7321"))
 SERIAL_GLOB = os.environ.get("CLAUDE_LIGHT_SERIAL", "/dev/cu.usbmodem*")
@@ -41,16 +41,20 @@ CLAUDE_PROJECTS_DIR = Path(os.environ.get(
     str(Path.home() / ".claude" / "projects"),
 ))
 QUOTA_INTERVAL_S = 30
-COMMAND_POLL_S = 1
 SESSION_STALE_S = int(os.environ.get("CLAUDE_LIGHT_SESSION_STALE_S", "600"))
 R_STALE_S = int(os.environ.get("CLAUDE_LIGHT_R_STALE_S", "60"))   # R(推理)无心跳超时→降级 G(应对 ESC 中断不触发任何 hook)
 LIGHT_REFRESH_S = 3        # 强制重发间隔=灯拔插后最大恢复延迟;每次仅 glob+1字节串口写,开销可忽略
+PUSH_REFRESH_S = int(os.environ.get("CLAUDE_LIGHT_PUSH_REFRESH_S", "600"))  # 周期重推 APNs:错过变化推送的手机最多此间隔后自愈
 
 # 优先级:数字大者优先。Y(等你)> R(推理)> G(完成)
 PRIORITY = {"Y": 3, "R": 2, "G": 1}
 
 # 允许的来源:本机 + Tailscale CGNAT 段(没有配置文件时的回退)
 _TAILNET = ipaddress.ip_network("100.64.0.0/10")
+# 手机不装 Tailscale 时经家庭局域网注册/读状态。仅 /register(有 secret 把门)
+# 和 /health(只读)放行私网段;/event 仍只收本机+tailnet,防局域网设备伪造灯态。
+_LAN_NETS = [ipaddress.ip_network(n) for n in
+             ("192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12")]
 
 # ---- 配置文件:master(亮灯机)/ slaves(允许上报状态的远程机器白名单)----
 # 路径:env CLAUDE_LIGHT_CONFIG,默认 ~/.config/claude-traffic-light/config.json
@@ -91,15 +95,20 @@ current_quota = {}
 stats = {"pings": 0}       # 诊断计数:收到的心跳数,看 /health
 
 
-def client_allowed(ip):
+def client_allowed(ip, lan_ok=False):
     if ip in ("127.0.0.1", "::1", "localhost"):
         return True                       # 本机(master 自己的状态走回环)永远允许
-    if ALLOWED_PEERS is not None:
-        return ip in ALLOWED_PEERS        # 配了 master/slaves:白名单,只收这些
+    if not lan_ok and ALLOWED_PEERS is not None:
+        return ip in ALLOWED_PEERS        # /event 配了 master/slaves:白名单,只收这些机器的状态
+    # /register(有 secret 把门)/health(只读)不受白名单约束:
+    # 手机不是"上报状态的机器",经 tailnet 或家庭私网都放行。
     try:
-        return ipaddress.ip_address(ip) in _TAILNET   # 没配置:回退接收整个 tailnet
+        addr = ipaddress.ip_address(ip)
     except Exception:
         return False
+    if addr in _TAILNET:
+        return True
+    return lan_ok and any(addr in net for net in _LAN_NETS)
 
 
 # ---- 配额计算(保留;未配中继时不扫)----
@@ -156,8 +165,8 @@ def scan_quota():
 
 def quota_loop():
     global current_quota
-    if not RELAY_URL:
-        return  # 配额只用于中继(iOS)推送;没配中继就不扫,省得反复读一堆 jsonl
+    if not apns.enabled():
+        return  # 配额只随 iOS 推送下发;推送没启用就不扫,省得反复读一堆 jsonl
     while True:
         try:
             current_quota = scan_quota()
@@ -236,9 +245,18 @@ def light_loop():
     # 每周期强制重发当前状态(force=True):灯拔插/复位后固件归 0、agent 状态
     # 没变就不会主动补发,这里兜底让灯自动恢复。配合固件"同状态字节忽略",
     # 稳态下重发是空操作,不会打断红呼吸/黄慢闪的动画。
+    #
+    # 同理每 PUSH_REFRESH_S 向手机重推一次当前状态(实体灯兜底的对偶):
+    # 哪次变化推送没送达(手机离线/APNs 抖动),最多一个周期后自愈,
+    # 不再永久停在旧颜色。同内容重推手机端只是原样重渲染,无感。
+    last_push_refresh = time.time()
     while True:
         try:
-            refresh_light(force=True)
+            agg = refresh_light(force=True)
+            if time.time() - last_push_refresh >= PUSH_REFRESH_S:
+                last_push_refresh = time.time()
+                if agg in ("R", "Y", "G"):
+                    threading.Thread(target=push_state, args=(agg,), daemon=True).start()
         except Exception as e:
             print(f"[light_loop] {e}", file=sys.stderr)
         time.sleep(LIGHT_REFRESH_S)
@@ -256,73 +274,43 @@ def drop_session(session_id):
         sessions.pop(sid, None)
 
 
-# ---- 推送到中继(保留;未配 RELAY_URL/UPDATE_SECRET 时直接返回)----
+# ---- iOS 推送(本地 APNs 直推;未配 APNS 环境变量时空转)----
 
 def push_state(state):
-    if not RELAY_URL or not UPDATE_SECRET:
+    """把状态直推到所有已注册的手机 Live Activity。
+
+    失败重试 2 次(1s/3s 退避):状态翻转频繁,单次推送丢失会让手机
+    永久停在旧颜色直到下一次状态变化——这正是 Cloudflare 时代"灯卡绿"
+    的根源,本地直推 + 重试 + light_loop 周期重推三层兜底。
+    """
+    if not apns.enabled():
         return
     if state not in ("R", "Y", "G"):
         return
-    body = {"state": state, "secret": UPDATE_SECRET, "quota": current_quota}
-    try:
-        req = urllib.request.Request(
-            f"{RELAY_URL}/update",
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            resp.read()
-    except Exception as e:
-        print(f"[push_state] {e}", file=sys.stderr)
-
-
-# ---- tmux 命令注入(保留;iOS 遥控批准用,未配中继时 command_loop 不启动)----
-
-def tmux_send(*keys):
-    try:
-        subprocess.run(
-            ["tmux", "send-keys", "-t", TMUX_TARGET, *keys],
-            check=True, timeout=2,
-        )
-    except Exception as e:
-        print(f"[tmux] send {keys} -> {e}", file=sys.stderr)
-
-
-def execute_command(cmd):
-    action = cmd.get("action")
-    if action == "approve":
-        tmux_send("y", "Enter")
-    elif action == "deny":
-        tmux_send("n", "Enter")
-    elif action == "stop":
-        tmux_send("Escape", "Escape")
-    else:
-        print(f"[cmd] unknown action {action}", file=sys.stderr)
-
-
-def command_loop():
-    if not RELAY_URL or not COMMAND_SECRET:
-        return
-    while True:
+    content_state = {"state": state, "updatedAt": int(time.time())}
+    if current_quota:
+        content_state["quota"] = current_quota
+    for attempt, backoff in ((1, 1), (2, 3), (3, 0)):
         try:
-            req = urllib.request.Request(
-                f"{RELAY_URL}/commands?secret={COMMAND_SECRET}",
-                method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read())
-                for cmd in data.get("commands", []):
-                    execute_command(cmd)
-        except Exception:
-            pass  # 网络抖动是常态
-        time.sleep(COMMAND_POLL_S)
+            results = apns.push_all(content_state)
+            bad = [r for r in results if r["status"] not in (200, 400, 410)]
+            if not bad:
+                return
+            print(f"[push_state] attempt {attempt}: {bad}", file=sys.stderr)
+        except Exception as e:
+            print(f"[push_state] attempt {attempt}: {e}", file=sys.stderr)
+        if backoff:
+            time.sleep(backoff)
 
 
 # ---- HTTP 入口:接收各机各会话 hook 事件 ----
 
 class HookHandler(BaseHTTPRequestHandler):
     def do_POST(self):
+        if self.path == "/register":
+            if not client_allowed(self.client_address[0], lan_ok=True):
+                self._respond(403); return
+            self._handle_register(); return
         if not client_allowed(self.client_address[0]):
             self._respond(403); return
         if self.path != "/event":
@@ -365,33 +353,67 @@ class HookHandler(BaseHTTPRequestHandler):
         refresh_light()
         self._respond(200)
 
+    def _handle_register(self):
+        """iOS App 注册 Live Activity push token(原 Cloudflare /register)。
+        注册成功立即回推当前状态:App 一打开,灵动岛秒同步,不用等下次变化。"""
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(length))
+        except Exception:
+            self._respond(400); return
+        if not REGISTER_SECRET or body.get("secret") != REGISTER_SECRET:
+            self._respond(401); return
+        token = body.get("token")
+        if not token:
+            self._respond(400); return
+        if not apns.enabled():
+            print(f"[register] rejected: apns disabled ({apns.disabled_reason()})",
+                  file=sys.stderr)
+            self._respond(503); return
+        n = apns.register_token(token)
+        print(f"[register] token {token[:8]}… ({n} total)", file=sys.stderr)
+        agg = aggregate_state()
+        if agg in ("R", "Y", "G"):
+            threading.Thread(target=push_state, args=(agg,), daemon=True).start()
+        self._respond_json({"ok": True, "tokens": n})
+
     def do_GET(self):
-        if not client_allowed(self.client_address[0]):
+        if not client_allowed(self.client_address[0], lan_ok=(self.path == "/health")):
             self._respond(403); return
         if self.path == "/health":
             agg = aggregate_state()
-            body = json.dumps({
+            self._respond_json({
                 "ok": True,
                 "aggregate": agg,
                 "sessions": summarize_sessions(),
                 "quota": current_quota,
                 "serial_glob": SERIAL_GLOB,
                 "bind": f"{LISTEN_BIND}:{LISTEN_PORT}",
-                "relay": bool(RELAY_URL),
-                "peers": sorted(ALLOWED_PEERS) if ALLOWED_PEERS is not None else "tailnet(未配置文件)",
+                "apns": {"enabled": apns.enabled(),
+                         "reason": apns.disabled_reason(),
+                         "env": apns.APNS_ENV,
+                         "tokens": apns.token_count() if apns.enabled() else 0},
+                "peers": sorted(ALLOWED_PEERS) if ALLOWED_PEERS is not None else "tailnet+lan(未配置文件)",
                 "pings": stats["pings"],
                 "r_stale_s": R_STALE_S,
-            }).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(body)
+                # iOS App fetchLatest() 兼容(原 worker /health 的形状):
+                # 无会话(灭)对手机就是"空闲",报 G。
+                "latest": {"state": agg if agg in ("R", "Y", "G") else "G",
+                           "updatedAt": int(time.time())},
+            })
         else:
             self._respond(404)
 
     def _respond(self, code):
         self.send_response(code)
         self.end_headers()
+
+    def _respond_json(self, obj, code=200):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, *args):
         pass  # 静音
@@ -402,15 +424,16 @@ class HookHandler(BaseHTTPRequestHandler):
 def main():
     print(f"[agent] listening on {LISTEN_BIND}:{LISTEN_PORT}")
     print(f"[agent] serial glob: {SERIAL_GLOB}")
-    print(f"[agent] relay: {RELAY_URL or '(not configured)'}")
+    apns_desc = (f"enabled ({apns.APNS_ENV}, {apns.token_count()} tokens)"
+                 if apns.enabled() else f"disabled ({apns.disabled_reason()})")
+    print(f"[agent] apns push: {apns_desc}")
     print(f"[agent] priority: Y > R > G   stale cutoff: {SESSION_STALE_S}s")
 
     # 启动即把灯归到"无会话=灭"
     refresh_light()
 
-    # 后台线程:配额扫描(仅配了中继才跑)、命令轮询、灯超时刷新
+    # 后台线程:配额扫描(仅启用推送才跑)、灯超时刷新+周期重推
     threading.Thread(target=quota_loop, daemon=True).start()
-    threading.Thread(target=command_loop, daemon=True).start()
     threading.Thread(target=light_loop, daemon=True).start()
 
     # 立刻开始监听,不被初始配额扫描阻塞(launchd 下 IO 受限会拖死启动)

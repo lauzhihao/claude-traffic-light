@@ -1,122 +1,204 @@
 import SwiftUI
 import ActivityKit
 
+// 配色:主色调 Claude 土黄,强调色橙
+extension Color {
+    static let ctTan     = Color(red: 0.91, green: 0.85, blue: 0.74)  // 土黄背景
+    static let ctInk     = Color(red: 0.26, green: 0.19, blue: 0.13)  // 深棕文字
+    static let ctOrange  = Color(red: 0.85, green: 0.45, blue: 0.18)  // 橙色强调/按钮
+    static let ctHousing = Color(red: 0.16, green: 0.13, blue: 0.11)  // 灯壳深色
+}
+
+// 配置已写死在 RelayConfig,App 打开即自动同步。
+// 首页:顶部横版红绿灯 + 状态词;中部留白(待接入业务工作流)。
 struct ContentView: View {
-    @AppStorage("relayUrl") private var relayUrl: String = ""
-    @AppStorage("registerSecret") private var registerSecret: String = ""
-    @AppStorage("commandSecret") private var commandSecret: String = ""
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var activity: Activity<ClaudeAttributes>?
-    @State private var status: String = "未启动"
-    @State private var lastToken: String = ""
+    @State private var state: String = "G"
+    @State private var status: String = ""
+    @State private var didSync = false
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("中继配置") {
-                    TextField("Worker URL", text: $relayUrl)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("REGISTER_SECRET", text: $registerSecret)
-                    SecureField("COMMAND_SECRET（遥控批准/拒绝）", text: $commandSecret)
+        ZStack {
+            Color.ctTan.ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                // 横版红绿灯:置顶居中
+                HorizontalTrafficLight(state: state)
+                    .padding(.top, 8)
+
+                Text(stateLabelLocal(state))
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(stateColorLocal(state))
+                    .contentTransition(.opacity)
+
+                if !status.isEmpty {
+                    Text(status)
+                        .font(.footnote)
+                        .foregroundStyle(Color.ctInk.opacity(0.55))
+                        .multilineTextAlignment(.center)
                 }
 
-                Section {
-                    if activity == nil {
-                        Button("开始同步") {
-                            Task { await start() }
-                        }
-                        .disabled(relayUrl.isEmpty || registerSecret.isEmpty)
-                    } else {
-                        Button("停止同步", role: .destructive) {
-                            Task { await stop() }
-                        }
+                // 中部留白:后续接入专用业务工作流
+                Spacer()
+
+                if activity == nil {
+                    Button {
+                        Task { await start() }
+                    } label: {
+                        Label("重新连接", systemImage: "arrow.clockwise")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
                     }
-                }
-
-                Section("说明") {
-                    Text("REGISTER_SECRET 必填，用于把这台手机注册到中继。\nCOMMAND_SECRET 可选，配了之后灵动岛上的按钮才能遥控 Mac 上的 Claude 批准/拒绝工具。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("状态") {
-                    Text(status).font(.callout)
-                    if !lastToken.isEmpty {
-                        Text("Token: \(lastToken)").font(.caption2).foregroundStyle(.secondary)
-                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.ctOrange)
+                    .controlSize(.large)
                 }
             }
-            .navigationTitle("Claude 红绿灯")
+            .padding(.horizontal, 24)
+            .padding(.top, 12)
+            .padding(.bottom, 20)
+            .foregroundStyle(Color.ctInk)
+        }
+        .task(id: scenePhase) {
+            if scenePhase == .active && !didSync { await bootstrap() }
+        }
+    }
+
+    // MARK: - 同步逻辑
+
+    @MainActor
+    func bootstrap() async {
+        await fetchLatest()
+        if let existing = Activity<ClaudeAttributes>.activities.first {
+            if activity == nil {
+                activity = existing
+                withAnimation { state = existing.content.state.state }
+                observe(existing)
+            }
+            didSync = true
+        } else {
+            await start()
         }
     }
 
     @MainActor
     func start() async {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-            status = "请在设置 → ClaudeTrafficLight 里开启 Live Activity"
+            status = "请在 设置 → ClaudeTrafficLight 打开「实时活动」后重开 App"
             return
         }
-        do {
-            let attrs = ClaudeAttributes(name: "Claude Code")
-            let initial = ClaudeAttributes.ContentState(
-                state: "G",
-                updatedAt: .now
-            )
-            let act = try Activity.request(
-                attributes: attrs,
-                content: .init(state: initial, staleDate: nil),
-                pushType: .token
-            )
-            activity = act
-            status = "已启动，等待 push token…"
-            Task { await observe(activity: act) }
-        } catch {
-            status = "启动失败：\(error.localizedDescription)"
-        }
-    }
-
-    @MainActor
-    func stop() async {
-        guard let act = activity else { return }
-        await act.end(nil, dismissalPolicy: .immediate)
-        activity = nil
-        status = "已停止"
-    }
-
-    func observe(activity act: Activity<ClaudeAttributes>) async {
-        for await tokenData in act.pushTokenUpdates {
-            let token = tokenData.map { String(format: "%02x", $0) }.joined()
-            await MainActor.run {
-                lastToken = String(token.prefix(12)) + "…"
+        let initial = ClaudeAttributes.ContentState(state: state, updatedAt: .now)
+        for attempt in 1...6 {
+            do {
+                let act = try Activity.request(
+                    attributes: ClaudeAttributes(name: "Claude Code"),
+                    content: .init(state: initial, staleDate: nil),
+                    pushType: .token
+                )
+                activity = act
+                didSync = true
+                status = ""
+                observe(act)
+                return
+            } catch {
+                status = "正在启动…(\(attempt)/6)"
+                try? await Task.sleep(nanoseconds: 500_000_000)
             }
-            await register(token: token)
+        }
+        status = "启动失败,请点下方「重新连接」"
+    }
+
+    func observe(_ act: Activity<ClaudeAttributes>) {
+        Task {
+            for await tokenData in act.pushTokenUpdates {
+                let token = tokenData.map { String(format: "%02x", $0) }.joined()
+                await register(token: token)
+            }
+        }
+        Task {
+            for await content in act.contentUpdates {
+                await MainActor.run { withAnimation { state = content.state.state } }
+            }
         }
     }
 
     func register(token: String) async {
-        guard let url = URL(string: "\(relayUrl)/register") else {
-            await MainActor.run { status = "Worker URL 不合法" }
-            return
-        }
+        guard let url = URL(string: "\(RelayConfig.url)/register") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "token": token,
-            "secret": registerSecret,
+            "secret": RelayConfig.registerSecret,
         ])
         do {
             let (_, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            await MainActor.run {
-                status = code == 200
-                    ? "已注册到中继 ✓ 等 Mac 那边推状态"
-                    : "注册失败 HTTP \(code)"
-            }
+            await MainActor.run { status = code == 200 ? "" : "注册失败 HTTP \(code)" }
         } catch {
-            await MainActor.run { status = "注册请求失败：\(error.localizedDescription)" }
+            await MainActor.run { status = "注册请求失败:\(error.localizedDescription)" }
         }
+    }
+
+    // best-effort:从中继 /health 读一次当前状态,失败就静默。
+    func fetchLatest() async {
+        guard let url = URL(string: "\(RelayConfig.url)/health") else { return }
+        guard
+            let (data, _) = try? await URLSession.shared.data(from: url),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let latest = obj["latest"] as? [String: Any],
+            let s = latest["state"] as? String
+        else { return }
+        await MainActor.run { withAnimation { state = s } }
+    }
+}
+
+// MARK: - 横版红绿灯(置顶)
+
+struct HorizontalTrafficLight: View {
+    let state: String
+
+    var body: some View {
+        HStack(spacing: 20) {
+            bulb(.red,    on: state == "R")
+            bulb(.yellow, on: state == "Y")
+            bulb(.green,  on: state == "G")
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 18)
+        .background(Color.ctHousing)
+        .clipShape(Capsule())
+        .shadow(color: .black.opacity(0.18), radius: 10, y: 6)
+    }
+
+    func bulb(_ c: Color, on: Bool) -> some View {
+        Circle()
+            .fill(on ? c : c.opacity(0.15))
+            .frame(width: 56, height: 56)
+            .overlay(Circle().stroke(.white.opacity(on ? 0.28 : 0.06), lineWidth: 1.5))
+            .shadow(color: on ? c.opacity(0.9) : .clear, radius: on ? 16 : 0)
+            .animation(.easeInOut(duration: 0.25), value: on)
+    }
+}
+
+// 文案颜色与灯的纯色保持一致(红/黄/绿)
+func stateColorLocal(_ s: String) -> Color {
+    switch s {
+    case "R": return .red
+    case "Y": return .yellow
+    case "G": return .green
+    default:  return .gray
+    }
+}
+
+func stateLabelLocal(_ s: String) -> String {
+    switch s {
+    case "R": return "推理中"
+    case "Y": return "等待决策"
+    case "G": return "空闲"
+    default:  return "—"
     }
 }
 

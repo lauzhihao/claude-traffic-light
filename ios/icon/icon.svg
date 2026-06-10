@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+  <radialGradient id="bg" cx="42%" cy="36%" r="82%">
+    <stop offset="0%"  stop-color="#EA8C6C"/>
+    <stop offset="58%" stop-color="#DC7351"/>
+    <stop offset="100%" stop-color="#C85D3D"/>
+  </radialGradient>
+  <filter id="ss" x="-50%" y="-50%" width="200%" height="200%">
+    <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#3a140a" flood-opacity="0.22"/>
+  </filter>
+</defs>
+<rect width="1024" height="1024" fill="url(#bg)"/>
+<g transform="translate(1024,0) scale(-1,1)"><g filter="url(#ss)">
+<rect x="486.0" y="150.1" width="52.0" height="337.9" rx="26.0" fill="#F4EEE2" transform="rotate(0.00 512.0 512.0)"/>
+<rect x="486.0" y="123.5" width="52.0" height="364.5" rx="26.0" fill="#F4EEE2" transform="rotate(30.00 512.0 512.0)"/>
+<rect x="486.0" y="116.3" width="52.0" height="371.7" rx="26.0" fill="#F4EEE2" transform="rotate(60.00 512.0 512.0)"/>
+<rect x="486.0" y="130.5" width="52.0" height="357.5" rx="26.0" fill="#F4EEE2" transform="rotate(90.00 512.0 512.0)"/>
+<rect x="486.0" y="162.2" width="52.0" height="325.8" rx="26.0" fill="#F4EEE2" transform="rotate(120.00 512.0 512.0)"/>
+<rect x="486.0" y="203.0" width="52.0" height="285.0" rx="26.0" fill="#F4EEE2" transform="rotate(150.00 512.0 512.0)"/>
+<rect x="486.0" y="241.9" width="52.0" height="246.1" rx="26.0" fill="#F4EEE2" transform="rotate(180.00 512.0 512.0)"/>
+<rect x="486.0" y="268.5" width="52.0" height="219.5" rx="26.0" fill="#F4EEE2" transform="rotate(210.00 512.0 512.0)"/>
+<rect x="486.0" y="275.7" width="52.0" height="212.3" rx="26.0" fill="#F4EEE2" transform="rotate(240.00 512.0 512.0)"/>
+<rect x="486.0" y="261.5" width="52.0" height="226.5" rx="26.0" fill="#F4EEE2" transform="rotate(270.00 512.0 512.0)"/>
+<rect x="486.0" y="229.8" width="52.0" height="258.2" rx="26.0" fill="#F4EEE2" transform="rotate(300.00 512.0 512.0)"/>
+<rect x="486.0" y="189.0" width="52.0" height="299.0" rx="26.0" fill="#F4EEE2" transform="rotate(330.00 512.0 512.0)"/>
+<circle cx="512.0" cy="512.0" r="31.2" fill="#F4EEE2"/>
+</g></g>
+</svg>

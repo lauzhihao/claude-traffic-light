@@ -7,7 +7,7 @@ struct ClaudeLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: ClaudeAttributes.self) { context in
             LockScreenView(state: context.state)
-                .activityBackgroundTint(.black.opacity(0.85))
+                .activityBackgroundTint(Color(red: 0.13, green: 0.07, blue: 0.05).opacity(0.92))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
             DynamicIsland {

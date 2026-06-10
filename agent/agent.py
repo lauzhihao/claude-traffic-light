@@ -56,8 +56,10 @@ PRIORITY = {"Y": 3, "R": 2, "G": 1}
 _TAILNET = ipaddress.ip_network("100.64.0.0/10")
 # 手机不装 Tailscale 时经家庭局域网注册/读状态。仅 /register(有 secret 把门)
 # 和 /health(只读)放行私网段;/event 仍只收本机+tailnet,防局域网设备伪造灯态。
+# 169.254/16:iPhone 镜像/隔空投送走 AWDL 点对点链路时,手机源地址落在
+# IPv4 链路本地段——同样是贴身设备,放行(register 仍有 secret 把门)。
 _LAN_NETS = [ipaddress.ip_network(n) for n in
-             ("192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12")]
+             ("192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "169.254.0.0/16")]
 
 # ---- 配置文件:master(亮灯机)/ slaves(允许上报状态的远程机器白名单)----
 # 路径:env CLAUDE_LIGHT_CONFIG,默认 ~/.config/claude-traffic-light/config.json
@@ -314,6 +316,7 @@ class HookHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/register":
             if not client_allowed(self.client_address[0], lan_ok=True):
+                print(f"[register] rejected ip {self.client_address[0]}", file=sys.stderr)
                 self._respond(403); return
             self._handle_register(); return
         if not client_allowed(self.client_address[0]):

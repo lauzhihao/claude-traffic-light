@@ -1,4 +1,10 @@
-# Cloudflare Worker · APNs 中继
+# Cloudflare Worker · APNs 中继(已退役)
+
+> ⚠️ **已被本地直推取代,仅留档。** APNs 中继现在内置在 `agent/apns.py`:
+> agent 自己持 .p8 签 JWT、HTTP/2 直推 `api.push.apple.com`,手机经局域网/
+> Tailscale 向 agent `POST /register`。状态的唯一生产者就是跑 agent 的 Mac,
+> 中继放本地少一跳出境网络(workers.dev 需走代理且会超时丢推送,APNs 国内
+> 直连可达)。配置见 `agent/com.claudelight.agent.plist` 模板的 APNS 段。
 
 接收 Mac hook 的 `/update` 和 iOS App 的 `/register`，转成 APNs 推送。
 

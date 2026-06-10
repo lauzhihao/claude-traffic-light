@@ -21,6 +21,8 @@ xcuserdata/
 secrets.json
 # 本机白名单配置(含具体 tailscale IP);仓库只放 agent/config.example.json
 agent/config.json
+# iOS 连接配置(真实地址+密钥);仓库只放 RelayConfig.example.swift
+ios/ClaudeTrafficLight/RelayConfig.swift
 
 # macOS
 .DS_Store

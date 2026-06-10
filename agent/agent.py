@@ -41,6 +41,9 @@ CLAUDE_PROJECTS_DIR = Path(os.environ.get(
     str(Path.home() / ".claude" / "projects"),
 ))
 QUOTA_INTERVAL_S = 30
+# 配额扫描窗口(天):只读 mtime 在窗口内的会话 jsonl,也只累计窗口内的条目。
+# 默认 3 天——会话一多,7 天窗口每 30s 全量重读太费 IO;要对齐官方 7 天配额就设回 7。
+QUOTA_SCAN_DAYS = int(os.environ.get("CLAUDE_LIGHT_QUOTA_SCAN_DAYS", "3"))
 SESSION_STALE_S = int(os.environ.get("CLAUDE_LIGHT_SESSION_STALE_S", "600"))
 R_STALE_S = int(os.environ.get("CLAUDE_LIGHT_R_STALE_S", "60"))   # R(推理)无心跳超时→降级 G(应对 ESC 中断不触发任何 hook)
 LIGHT_REFRESH_S = 3        # 强制重发间隔=灯拔插后最大恢复延迟;每次仅 glob+1字节串口写,开销可忽略
@@ -125,12 +128,12 @@ def scan_quota():
         return {}
     now = time.time()
     cutoff_5h = now - 5 * 3600
-    cutoff_7d = now - 7 * 86400
+    cutoff_scan = now - QUOTA_SCAN_DAYS * 86400
     tokens_5h = 0
-    tokens_7d = 0
+    tokens_scan = 0
     for jsonl_path in CLAUDE_PROJECTS_DIR.rglob("*.jsonl"):
         try:
-            if jsonl_path.stat().st_mtime < cutoff_7d:
+            if jsonl_path.stat().st_mtime < cutoff_scan:
                 continue
             with jsonl_path.open() as f:
                 for line in f:
@@ -142,7 +145,7 @@ def scan_quota():
                     if not ts_raw:
                         continue
                     t = parse_iso_ts(ts_raw)
-                    if t is None or t < cutoff_7d:
+                    if t is None or t < cutoff_scan:
                         continue
                     usage = (entry.get("message") or {}).get("usage") or {}
                     total = (
@@ -151,14 +154,16 @@ def scan_quota():
                         + usage.get("cache_read_input_tokens", 0)
                         + usage.get("cache_creation_input_tokens", 0)
                     )
-                    tokens_7d += total
+                    tokens_scan += total
                     if t >= cutoff_5h:
                         tokens_5h += total
         except Exception as e:
             print(f"[quota] skip {jsonl_path}: {e}", file=sys.stderr)
     return {
         "tokens5h": tokens_5h,
-        "tokens7d": tokens_7d,
+        # 键名保持 tokens7d 不动:它是 iOS ContentState.Quota 的 Codable 字段,改名要发版;
+        # 实际含义=最近 QUOTA_SCAN_DAYS 天(默认 3)的累计 token。
+        "tokens7d": tokens_scan,
         "updatedAt": int(now),
     }
 

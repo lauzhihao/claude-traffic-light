@@ -78,8 +78,8 @@ struct StatusIconWidget: Widget {
         StaticConfiguration(kind: "ClaudeStatusIcon", provider: StatusProvider()) { entry in
             StatusIconView(state: entry.state)
         }
-        .configurationDisplayName("Claude 状态")
-        .description("主屏上的 Claude 红绿灯,右下圆点显示推理状态(受 iOS 刷新配额限制,可能滞后几分钟)。")
+        .configurationDisplayName("SClaude")
+        .description("SClaude traffic light on your Home Screen; the bottom-right dot shows the current state (updates are throttled by iOS, so it may lag a few minutes).")
         .supportedFamilies([.systemSmall])
     }
 }

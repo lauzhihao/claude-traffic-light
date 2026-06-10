@@ -5,8 +5,8 @@ import Foundation
 // 必须加入主 App 和 Widget Extension 两个 target 的 Membership。
 
 public struct ApproveIntent: LiveActivityIntent {
-    public static var title: LocalizedStringResource = "批准"
-    public static var description = IntentDescription("批准 Claude 的工具调用")
+    public static var title: LocalizedStringResource = "Approve"
+    public static var description = IntentDescription("Approve Claude's tool call")
 
     @Parameter(title: "Request ID")
     public var requestId: String
@@ -21,8 +21,8 @@ public struct ApproveIntent: LiveActivityIntent {
 }
 
 public struct DenyIntent: LiveActivityIntent {
-    public static var title: LocalizedStringResource = "拒绝"
-    public static var description = IntentDescription("拒绝 Claude 的工具调用")
+    public static var title: LocalizedStringResource = "Deny"
+    public static var description = IntentDescription("Deny Claude's tool call")
 
     @Parameter(title: "Request ID")
     public var requestId: String

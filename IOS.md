@@ -5,13 +5,9 @@
 iOS 不允许任何第三方（蓝牙/WiFi/任何本地协议）直接刷新灵动岛，**只接受 Apple 官方推送服务（APNs）**。所以最终的数据通路必须是：
 
 ```
-你的 Mac (Claude hook)
+你的 Mac (Claude hook → agent.py 聚合)
     │
-    │ HTTPS POST
-    ▼
-云端中继 (Cloudflare Worker)
-    │
-    │ HTTP/2 + JWT 鉴权
+    │ agent 内置 apns.py：HTTP/2 + JWT(ES256) 鉴权
     ▼
 Apple APNs 服务器
     │
@@ -26,16 +22,18 @@ iPhone 上你写的那个 iOS App
 
 整链路延迟实测一般 < 1 秒，对"红黄绿状态"够用。
 
+> 早期版本在 Mac 和 APNs 之间隔了一层 Cloudflare Worker 中继，已于 2026-06 退役：签 JWT 推 Apple 这件事本地完全能做（`agent/apns.py`），少一跳出境网络（workers.dev 在国内必须走代理，APNs 反而直连可达），也少一套要维护的云端密钥。
+
 ## 三个组件分别要做什么
 
 ### 1. iOS App（Swift / SwiftUI）
 
-**作用**：注册一个 Live Activity，把 Apple 颁发的推送 Token 上传到你的中继。
+**作用**：注册一个 Live Activity，把 Apple 颁发的推送 Token 上传给 Mac 上的 agent。
 
-最小 UI 只有一个按钮："开始同步 Claude"。点了之后：
+App 打开即自动同步（无需手填）：
 - `ActivityKit` 启动一个 `Activity<ClaudeAttributes>`
 - 拿到 `pushToken`（一个只对这个 activity 有效的 token）
-- POST 给中继：`{ token: "...", secret: "<你设的密钥>" }`
+- POST 给 agent 的 `/register`：`{ token: "...", secret: "<你设的密钥>" }`（家庭 Wi-Fi 走 `.local` Bonjour 名，装了 Tailscale 走 100.x，按 `RelayConfig.urls` 顺序尝试）
 
 灵动岛 UI 在 **Widget Extension** 里写（同一个 Xcode project 的另一个 target）：
 
@@ -67,21 +65,16 @@ iPhone 上你写的那个 iOS App
 
 可选加分项：写一个 **Complication**（表盘上的永久小部件），用 WidgetKit。用户把它钉到表盘后，即便没有正在运行的 Live Activity 也能看到最近一次的颜色。
 
-### 2. 云中继（Cloudflare Worker 推荐）
+### 2. 本地 APNs 直推（`agent/apns.py`，内置在 agent 里）
 
-**作用**：接 Mac 的 webhook → 转成 APNs 推送格式 → 推给 Apple。
-
-为什么选 Cloudflare Worker：
-- 免费额度对个人项目绰绰有余（每天 10 万次请求）
-- 自带 HTTPS 域名，省事
-- 自带 KV 存储，存推送 token
-- 边缘部署，延迟低
-- 唯一的"麻烦"是要写 JavaScript，但代码量不到 100 行
+**作用**：状态变化时把聚合结果转成 APNs 推送格式 → 直接推给 Apple。
 
 它要做的事：
-1. `POST /register`：iOS App 把 push token 存到 KV
-2. `POST /update`：Mac hook 来调用，参数 `{state: "R"}` → 取出 KV 里所有 token → 给每个 token 发 APNs 推送
-3. APNs 推送需要用 ES256 算法签 JWT（用你的 `.p8` Auth Key）
+1. `POST /register`：iOS App 把 push token 注册进来（agent 持久化到本地文件，重启不丢）
+2. 状态变化 / 周期重推：给每个已注册 token 发 APNs 推送（失败重试 + 600s 周期兜底，防止手机错过推送永久停在旧颜色）
+3. APNs 推送用 ES256 算法签 JWT（用你的 `.p8` Auth Key），HTTP/2 直连 `api.push.apple.com`
+
+依赖 `agent/.venv`（`httpx[http2]` + `cryptography`）；APNs 凭据经 `CLAUDE_LIGHT_APNS_*` 环境变量注入，未配齐时推送自动空转、桌面灯照常。
 
 APNs 推送的 payload 长这样：
 ```json
@@ -115,23 +108,22 @@ authorization: bearer <JWT>
 
 ```
 1. Apple Dev 账号 + 创建 Bundle ID + .p8 key      （半天，主要是等审核）
-2. 用 Postman 手动调一次 APNs，确认 .p8 + JWT 正确 （1 小时）
-3. 写 Worker 中继，本地用 wrangler dev 跑          （半天）
+2. 手动调一次 APNs，确认 .p8 + JWT 正确            （1 小时）
+3. agent 配好 CLAUDE_LIGHT_APNS_* 环境变量         （30 分钟）
 4. Xcode 建 App + Widget Extension                （半天）
 5. 真机测 Live Activity 启动 + 接收推送            （1 天，含调坑）
-6. 把 Mac hook 改成同时推串口 + 推中继              （30 分钟）
 ```
 
 预计总投入：**1-2 个周末**。
 
 ## 与硬件的关系
 
-iOS 推送和硬件串口是**并行**两条路，hook 同时触发：
+iOS 推送和硬件串口是**并行**两条路，agent 聚合后同时分发：
 
 ```
-Claude hook (R)
-    ├── echo R > /dev/tty.usbmodem...    （硬件红绿灯亮红）
-    └── curl POST relay/update           （灵动岛变红）
+Claude hook (R) → agent.py 聚合
+    ├── 写串口 /dev/cu.usbmodem...       （硬件红绿灯亮红）
+    └── apns.py 直推 Apple               （灵动岛变红）
 ```
 
 这意味着任何一边坏了另一边都不受影响。视频拍摄时两边同步亮起的效果非常加分。

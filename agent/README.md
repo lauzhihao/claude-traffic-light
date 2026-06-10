@@ -1,47 +1,34 @@
 # Mac Agent
 
-驻留在 Mac 上的常驻进程。整个 T1（配额显示）+ T2（远程批准）的核心。
+驻留在「插着灯的那台 Mac」上的常驻进程，整个系统的仲裁核心：聚合所有机器、所有会话的状态 → 点灯 + 推手机。
 
 ## 它做什么
 
 | 职责 | 触发 | 频率 |
 |---|---|---|
-| 接收 hook 事件（R/Y/G/PRE） | localhost:7321/event POST | 实时 |
-| 计算 5h / 7d token 用量 | 扫 `~/.claude/projects/**/conversation_*.jsonl` | 每 30s |
-| 推送状态 + 配额 + 待批准操作到中继 | hook 触发后 | 实时 |
-| 轮询中继命令队列 | GET /commands | 每 1s |
-| 把 iOS 命令通过 tmux 注入 Claude | tmux send-keys | 命令到达时 |
-| 写状态字节到 USB 串口（顺手）| open() 写 | hook 触发时 |
+| 接收 hook 事件（R/Y/G/PRE/PING/START/END） | `:7321/event` POST（本机 + tailnet 白名单机器） | 实时 |
+| 多会话聚合，优先级 **🟡Y > 🔴R > 🟢G**，写 USB 串口 | 事件到达 / 周期兜底 | 实时 + 每 3s 强制重发 |
+| 剔除崩溃/中断的会话 | 超时（全量 600s；R 无心跳 60s 降级 G） | 每 3s |
+| iOS Live Activity 推送（APNs 直推，见 `apns.py`） | 状态变化 + 周期重推 | 实时 + 每 600s |
+| 接收 iPhone 注册 Live Activity push token | `/register` POST（secret 把门） | App 打开时 |
+| 计算 5h / 近 N 天 token 用量（N 默认 3，`CLAUDE_LIGHT_QUOTA_SCAN_DAYS` 可调） | 扫 `~/.claude/projects/**/*.jsonl`（仅 mtime 在窗口内的文件；仅启用推送时才扫） | 每 30s |
+| 状态查询 / 排障 | `/health` GET | 按需 |
 
-零外部 Python 依赖（纯 stdlib），不用装 pip 包。
+核心纯 stdlib；仅 iOS 推送需要 `agent/.venv`（`httpx[http2]` + `cryptography`），未配好时推送自动空转、纯本地灯不受影响。
+
+> 历史note：早期版本经 Cloudflare Worker 中继推 APNs、并支持 tmux 注入实现手机远程批准。两者均已退役：APNs 改为 agent 本地直推（少一跳出境网络）；远程批准是**有意不做**的产品决策（只做状态灯，不复刻官方 App 的批准流）。
 
 ## 快速跑起来
 
-### 1. 装 tmux（如果还没有）
+### 一键安装（推荐）
 
 ```bash
-brew install tmux
+bash agent/install.sh
 ```
 
-### 2. 设环境变量
+自动生成并加载 launchd 服务（开机自启）、把 hooks 合并进 `~/.claude/settings.json`（先备份、幂等）。多机同步 / 客户端模式见根 [README](../README.md#多机同步tailscale)。
 
-加到 `~/.zshrc`：
-
-```bash
-export CLAUDE_LIGHT_RELAY_URL="https://your-worker.workers.dev"
-export CLAUDE_LIGHT_UPDATE_SECRET="部署 Worker 时 put 的 UPDATE_SECRET"
-export CLAUDE_LIGHT_COMMAND_SECRET="部署 Worker 时 put 的 COMMAND_SECRET"
-# 可选
-export CLAUDE_LIGHT_TMUX_TARGET="claude"       # tmux session 名
-export CLAUDE_LIGHT_AGENT_PORT="7321"          # 监听端口
-export CLAUDE_LIGHT_SERIAL="/dev/tty.usbmodem*" # 硬件串口
-```
-
-```bash
-source ~/.zshrc
-```
-
-### 3. 跑 agent（前台调试）
+### 前台调试
 
 ```bash
 python3 agent/agent.py
@@ -51,9 +38,9 @@ python3 agent/agent.py
 
 ```
 [agent] listening on 127.0.0.1:7321
-[agent] relay: https://your-worker.workers.dev
-[agent] tmux target: claude
-[agent] initial quota: 5h=123,456  7d=1,234,567
+[agent] serial glob: /dev/cu.usbmodem*
+[agent] apns push: enabled (development, 1 tokens)
+[agent] priority: Y > R > G   stale cutoff: 600s
 ```
 
 打开新终端测试：
@@ -62,84 +49,54 @@ python3 agent/agent.py
 # 模拟一个 R 事件
 curl -X POST http://127.0.0.1:7321/event \
   -H "Content-Type: application/json" \
-  -d '{"state":"R","hook":{}}'
+  -d '{"state":"R","hook":{"session_id":"test"}}'
 
-# 看 agent 状态
-curl http://127.0.0.1:7321/health
+# 看 agent 状态（聚合值、各会话、白名单、APNs 状态）
+curl -s http://127.0.0.1:7321/health
 ```
 
-iPhone 上应该看到灵动岛变红。
+灯应变红；配好 APNs 的话 iPhone 灵动岛同步变色。
 
-### 4. 永久跑（开机自启）
+## 环境变量
 
-复制 plist 模板：
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `CLAUDE_LIGHT_BIND` | `127.0.0.1` | 多机同步设 `0.0.0.0` 监听 tailnet |
+| `CLAUDE_LIGHT_AGENT_PORT` | `7321` | 监听端口 |
+| `CLAUDE_LIGHT_SERIAL` | `/dev/cu.usbmodem*` | 串口 glob |
+| `CLAUDE_LIGHT_SESSION_STALE_S` | `600` | 会话无事件多久剔除 |
+| `CLAUDE_LIGHT_R_STALE_S` | `60` | R 无心跳多久降级 G（兜 ESC 中断） |
+| `CLAUDE_LIGHT_PUSH_REFRESH_S` | `600` | APNs 周期重推间隔 |
+| `CLAUDE_LIGHT_QUOTA_SCAN_DAYS` | `3` | 配额扫描窗口（天） |
+| `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | 配额扫描目录 |
+| `CLAUDE_LIGHT_REGISTER_SECRET` | 空 | `/register` 的密钥（空 = 拒绝注册） |
+| `CLAUDE_LIGHT_CONFIG` | `~/.config/claude-traffic-light/config.json` | master/slaves 白名单 |
+| `CLAUDE_LIGHT_APNS_P8` / `_KEY_ID` / `_TEAM_ID` / `_BUNDLE_ID` / `_ENV` | 空 / `development` | APNs 直推凭据，见 `apns.py` |
 
-```bash
-cp agent/com.claudelight.agent.plist ~/Library/LaunchAgents/
-```
+环境变量写进 `~/Library/LaunchAgents/com.claudelight.agent.plist`（`install.sh` 会生成），改完 `launchctl unload/load` 重启生效。
 
-编辑 `~/Library/LaunchAgents/com.claudelight.agent.plist`，把：
-- `ABSOLUTE_PATH_TO_REPO` 换成本仓库真实路径
-- 三个 secret 和 Worker URL 填进去
+## 安全模型
 
-加载：
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.claudelight.agent.plist 2>/dev/null
-launchctl load ~/Library/LaunchAgents/com.claudelight.agent.plist
-```
-
-看日志：
-
-```bash
-tail -f /tmp/claude-light-agent.log
-```
-
-### 5. 用 tmux 启 Claude（T2 必须）
-
-T2 远程批准要求 Claude 必须跑在 `tmux` 会话里：
-
-```bash
-agent/claude-tmux.sh   # 自动创建/附着名为 "claude" 的 tmux session
-```
-
-之后任何时候都可以在新终端 `tmux attach -t claude` 接回去。
+- `/event`：只收本机（127/::1）+ 白名单（`config.json` 的 master/slaves）；没配白名单回退收整个 tailnet（100.64.0.0/10）。
+- `/register`：额外放行家庭私网段（手机不装 Tailscale 也能注册），靠 `REGISTER_SECRET` 把门。
+- `/health`：只读，同样放行私网段。
 
 ## 配额数据从哪来
 
-直接解析 `~/.claude/projects/<project>/conversation_*.jsonl`：
-- 每行是一次 message 事件
-- 取 `message.usage.{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}` 求和
-- 按 `timestamp` 字段过滤 5h / 7d 窗口
+直接解析 `~/.claude/projects/**/*.jsonl`：
 
-Anthropic 没公开 quota API，所以这是**本地估算**，不是官方剩余配额。但和 `ccusage` 工具同源逻辑，足够当参考。
+- 每行一次 message 事件，取 `message.usage.{input,output,cache_read_input,cache_creation_input}_tokens` 求和
+- 按 `timestamp` 过滤 5h / 近 N 天两个窗口（N 默认 3；下发 iOS 的键名保持 `tokens7d` 不变，免发版）
+- 只读 mtime 在窗口内的文件，控制每 30s 一轮的 IO
 
-## 命令注入工作原理
-
-iOS 灵动岛上的"批准/拒绝"按钮点击后：
-1. iOS App 的 LiveActivityIntent 触发，POST 到中继 `/command` `{id, action}`
-2. agent 每秒轮询中继 `/commands`，拉到命令
-3. 校验 `id` 还是当前的 pending（防止过期命令）
-4. `tmux send-keys -t claude y Enter`（或 `n Enter`）
-
-Claude Code 的工具批准 TUI 接受：
-- `y` 或 `1` = 允许一次
-- `n` 或 `3` 或 `Esc` = 拒绝
-
-如果你的 Claude 版本 hotkey 不同，改 `agent.py` 里 `execute_command()` 函数。
-
-## 安全提醒
-
-agent 只监听 `127.0.0.1`（localhost），外部网络访问不到。但仍要注意：
-- 不要在共享 Mac 上跑（同机其他用户能 POST 到 localhost:7321 触发状态变化）
-- 三个 SECRET 一定要随机，别用弱口令
-- 当前没有命令白名单 / Face ID gate，所以**任何拿到你 iPhone 的人都能批准/拒绝 Claude 工具调用**。建议给 iPhone 设强解锁。
+Anthropic 没公开 quota API，所以这是**本地估算**，不是官方剩余配额。和 `ccusage` 同源逻辑，够当参考。
 
 ## 故障排查
 
 | 现象 | 检查 |
 |---|---|
-| 灵动岛没反应 | `curl localhost:7321/health` 看 agent 是否在跑；`curl $RELAY_URL/health` 看中继配置 |
-| Quota 一直是 0 | `ls ~/.claude/projects/` 确认目录存在；用 `CLAUDE_PROJECTS_DIR` 环境变量覆盖路径 |
-| 批准/拒绝按 iOS 没反应 | `tmux ls` 确认有 "claude" session；agent 日志看是否拉到了命令 |
-| `tmux send-keys` 报错 no session | 你没在 tmux 里跑 Claude，先 `claude-tmux.sh` |
+| 灯不动 | `curl -s localhost:7321/health` 看 agent 在不在；`tail -f /tmp/claude-light-agent.log` |
+| 远程机器状态到不了 | `/health` 的 `peers` 字段确认白名单；远程机器 hooks 是否装在跑 Claude 的那个用户下 |
+| 灵动岛没反应 | `/health` 的 `apns` 字段看 enabled/reason/tokens；App 重开一次重新注册 |
+| 推送 BadDeviceToken | `CLAUDE_LIGHT_APNS_ENV` 选错：Xcode debug 装的 → `development`，TestFlight/AppStore → `production` |
+| Quota 一直是 0 | `ls ~/.claude/projects/` 确认目录存在；APNs 未启用时本来就不扫 |

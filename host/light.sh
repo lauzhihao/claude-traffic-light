@@ -3,7 +3,7 @@
 #
 # 行为：
 #   1. 优先 POST 到 localhost agent（带上 hook 的完整 stdin JSON）
-#   2. agent 不在时 fallback：直推中继 + 写串口
+#   2. agent 不在时 fallback：直接写串口（降级:灯仍随本地状态切换,无 iOS 推送）
 #
 # 用法：
 #   light.sh R    UserPromptSubmit
@@ -51,14 +51,6 @@ fi
 
 # Agent 不在 → fallback。PRE/PING/END 只对 agent 有意义(暂存/心跳/清会话),直接退出,不写串口
 case "$STATE" in PRE|PING|END) exit 0 ;; esac
-
-# 直推中继（后台）
-if [ -n "${CLAUDE_LIGHT_RELAY_URL:-}" ] && [ -n "${CLAUDE_LIGHT_UPDATE_SECRET:-}" ]; then
-  (curl -sS -m 2 -X POST "$CLAUDE_LIGHT_RELAY_URL/update" \
-     -H "Content-Type: application/json" \
-     -d "{\"state\":\"$STATE\",\"secret\":\"$CLAUDE_LIGHT_UPDATE_SECRET\"}" \
-     >/dev/null 2>&1) &
-fi
 
 # 写串口
 SERIAL_GLOB="${CLAUDE_LIGHT_SERIAL:-/dev/tty.usbmodem*}"

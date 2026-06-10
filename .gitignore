@@ -1,7 +1,3 @@
-# Node / Cloudflare Worker
-node_modules/
-.wrangler/
-dist/
 *.log
 
 # Python
@@ -20,7 +16,6 @@ xcuserdata/
 .swiftpm/
 
 # Secrets / local config
-.dev.vars
 *.env
 .env
 secrets.json

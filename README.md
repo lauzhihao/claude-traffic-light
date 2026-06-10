@@ -15,19 +15,15 @@
 ## 架构
 
 ```
-Claude (tmux) ──hook──> light.sh ──> Mac Agent ──┬─> USB ──> Pico ──> 红绿灯
-                                          ↑       ├─> Worker ──APNs──> iPhone 灵动岛
-                                          │       │                   + Apple Watch
-                                          │       │                   + 锁屏批准按钮
-                       ccusage 扫 jsonl ──┘       │
-                                                  │
-                            tmux send-keys ◄──────┘ (轮询命令)
-                                                  ▲
-                                                  │
-                            iOS 灵动岛"批准/拒绝"按钮 → AppIntent → Worker
+本机 Claude Code ──hook──> light.sh ─┐
+                                     ├──> Mac Agent ──┬─> USB ──> Pico ──> 红绿灯
+其它机器 Claude ──hook──> light.sh ──┘   (多会话聚合    └─> APNs 直推 ──> iPhone 灵动岛
+        (经 Tailscale)                    Y>R>G 仲裁)                     + 锁屏 + Apple Watch
+                                     ↑
+                  配额扫描 jsonl ────┘ (随推送下发 5h/近3天 token 用量)
 ```
 
-Mac Agent 是核心调度器：算配额、发推送、收命令、注入 tmux。详见 [IOS.md](./IOS.md) 和 [agent/README.md](./agent/README.md)。
+Mac Agent 是核心仲裁者：聚合所有机器所有会话的状态、写串口点灯、直推 APNs 刷新手机。详见 [agent/README.md](./agent/README.md) 和 [IOS.md](./IOS.md)。
 
 ## 目录
 
@@ -36,12 +32,11 @@ claude-traffic-light/
 ├── README.md           # 本文件
 ├── TODO.md             # 待办 / 里程碑
 ├── HARDWARE.md         # 淘宝采购清单 + 接线图
-├── IOS.md              # iOS App + 灵动岛 + 云中继架构
+├── IOS.md              # iOS App + 灵动岛 + APNs 直推架构
 ├── firmware/           # Pico 端 MicroPython 代码
-├── host/               # Claude Code hook 脚本（极简模式）
-├── agent/              # Mac 常驻 agent：配额 + 双向命令通道
-├── ios/                # iOS App + Widget Extension + AppIntents
-└── relay/              # Cloudflare Worker 中继代码（双向）
+├── host/               # Claude Code hook 脚本（light.sh 分发器）
+├── agent/              # Mac 常驻 agent：多会话聚合 + APNs 直推 + 配额
+└── ios/                # iOS App + Widget Extension 源码快照
 ```
 
 ## 硬件成本
@@ -50,7 +45,7 @@ claude-traffic-light/
 
 ## 本地部署 / 移植到新机器（无 iOS）
 
-只要桌面这盏灯 + 一台 Mac 就能跑（灵动岛/云中继是可选的 iOS 增强）。**搬到新机器三步**：
+只要桌面这盏灯 + 一台 Mac 就能跑（灵动岛是可选的 iOS 增强，由 agent 直推 APNs，无需任何云服务）。**搬到新机器三步**：
 
 1. **硬件**：固件在 Pico 板子里、与电脑无关——换机器直接把红绿灯的 USB 插到新机器即可。首次烧录见 [firmware/README.md](./firmware/README.md)。
 2. **软件**：克隆本仓库，跑一键脚本：

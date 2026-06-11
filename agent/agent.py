@@ -215,33 +215,45 @@ def write_serial(state):
 
 # ---- 会话聚合 + 刷新灯 ----
 
+def _effective_state(s, now):
+    """会话的有效状态(**非破坏式**降级):R 超过 R_STALE_S 没心跳 → 按 G 计,但不写回。
+
+    单个工具调用 >R_STALE_S(几分钟的测试 Bash、慢 WebFetch、子 agent 长步骤)期间
+    没有任何 PING,R 会被判超时;但工具一结束 PostToolUse 的 PING 刷新 ts,age 归零 →
+    下次聚合自动还原成 R。若写回 G,PING 只刷 ts 不改色,R 永远救不回来,会一直绿到下个
+    回合(原 bug)。真 ESC 中断:之后再无 PING,ts 不刷新,age 持续增长 → 稳定停在 G。
+    调用方需已持有 state_lock。
+    """
+    if s["state"] == "R" and now - s["ts"] > R_STALE_S:
+        return "G"
+    return s["state"]
+
+
 def summarize_sessions():
+    # 报有效态而非原始上报态——与 aggregate_state 口径一致:超时的 R 在 /health 里也显示 G,
+    # 不再出现「sessions 显示 R、aggregate 却是 G」的对不上。
+    now = time.time()
     with state_lock:
-        return {sid[:8]: s["state"] for sid, s in sessions.items()}
+        return {sid[:8]: _effective_state(s, now) for sid, s in sessions.items()}
 
 
 def aggregate_state():
     """剔除过期会话,返回 Y/R/G 聚合值;一个会话都没有则返回 '0'(灭)。
 
     两级超时:① 任何会话超过 SESSION_STALE_S 直接剔除(防崩溃会话永久占灯);
-    ② R(推理)会话超过 R_STALE_S 没有心跳/事件 → 降级为 G。ESC 中断不触发任何
-    hook,靠 ② 把"卡红"在 ~R_STALE_S 内放掉;真在干活时工具调用的心跳(PING)会
-    不停刷新 ts,所以不会被误降级。
+    ② R(推理)会话超过 R_STALE_S 没有心跳/事件 → 本次聚合按 G 计(见 _effective_state)。
     """
     now = time.time()
     best, best_pri = None, 0
     with state_lock:
         for sid in list(sessions):
-            age = now - sessions[sid]["ts"]
-            if age > SESSION_STALE_S:
+            if now - sessions[sid]["ts"] > SESSION_STALE_S:
                 del sessions[sid]
-                continue
-            if sessions[sid]["state"] == "R" and age > R_STALE_S:
-                sessions[sid]["state"] = "G"   # 不再推理(中断/回合悄悄结束)→ 当作完成/空闲
         for s in sessions.values():
-            pri = PRIORITY.get(s["state"], 0)
+            eff = _effective_state(s, now)
+            pri = PRIORITY.get(eff, 0)
             if pri > best_pri:
-                best_pri, best = pri, s["state"]
+                best_pri, best = pri, eff
     return best or "0"
 
 

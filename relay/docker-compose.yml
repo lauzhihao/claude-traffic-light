@@ -17,5 +17,10 @@ services:
       RELAY_DB: /data/relay.db
       RELAY_APNS_P8: /secrets/apns.p8
     volumes:
-      - ./data:/data                                # sqlite 持久化
+      # 命名卷(非 bind):Docker 用镜像里 /data 的属主(relay/10001)初始化卷,
+      # 容器非 root 进程能直接写 sqlite。bind 挂宿主 root 目录会因属主不符写不进而崩。
+      - relaydata:/data
       - ${RELAY_APNS_P8_HOST}:/secrets/apns.p8:ro   # 宿主机 .p8 只读挂入
+
+volumes:
+  relaydata:

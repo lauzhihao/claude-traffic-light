@@ -164,8 +164,12 @@ def _reset_client():
 
 # ---- 推送 ----
 
-def push_all(content_state):
+def push_all(content_state, priority=10):
     """向所有已注册 token 推一次 Live Activity 更新。
+
+    priority:APNs apns-priority。10=即时投递、全额计入 Apple 的 Live Activity
+    预算桶(用于用户可见的转场);5=系统可延迟/合并、极省预算(用于高频抖动期
+    的尾推)。持续 churn 全用 10 会抽干预算→被限流丢弃→手机卡帧。
 
     返回 [{"token": 前8位, "status": http状态码或异常名}];
     Apple 答 400/410(token 失效/已注销)时就地剔除该 token。
@@ -188,7 +192,7 @@ def push_all(content_state):
         "authorization": f"bearer {jwt}",
         "apns-topic": f"{BUNDLE_ID}.push-type.liveactivity",
         "apns-push-type": "liveactivity",
-        "apns-priority": "10",
+        "apns-priority": str(priority),
         "content-type": "application/json",
     }
 

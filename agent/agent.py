@@ -48,6 +48,10 @@ SESSION_STALE_S = int(os.environ.get("CLAUDE_LIGHT_SESSION_STALE_S", "600"))
 R_STALE_S = int(os.environ.get("CLAUDE_LIGHT_R_STALE_S", "60"))   # R(推理)无心跳超时→降级 G(应对 ESC 中断不触发任何 hook)
 LIGHT_REFRESH_S = 3        # 强制重发间隔=灯拔插后最大恢复延迟;每次仅 glob+1字节串口写,开销可忽略
 PUSH_REFRESH_S = int(os.environ.get("CLAUDE_LIGHT_PUSH_REFRESH_S", "600"))  # 周期重推 APNs:错过变化推送的手机最多此间隔后自愈
+# APNs 推送节流(秒):多会话/子 agent 飞快 R↔G 抖动时,每次变化都推会打爆
+# Apple 对 Live Activity 的推送配额→被限流→手机卡在某一帧。节流成 leading+trailing:
+# 首发立即推,冷却窗口内的连续变化合并为一发尾推(始终推最终态)。物理灯不受影响(本地即时)。
+PUSH_MIN_INTERVAL_S = float(os.environ.get("CLAUDE_LIGHT_PUSH_MIN_INTERVAL_S", "3"))
 
 # 优先级:数字大者优先。Y(等你)> R(推理)> G(完成)
 PRIORITY = {"Y": 3, "R": 2, "G": 1}
@@ -227,11 +231,66 @@ def aggregate_state():
     return best or "0"
 
 
+# ---- APNs 推送节流(leading + trailing)----
+# 物理灯走 write_serial,即时、无配额顾虑,不节流;只有出境 APNs 推送经此合并。
+_push_lock = threading.Lock()
+_push_last_t = 0.0            # 上次真正发起推送的时刻
+_push_timer = None           # 冷却期内挂起的尾推定时器(None=没有挂起)
+_push_pending = None         # 尾推要发的最终态(总是覆盖为最新聚合值)
+
+
+def _do_push(state, priority=10):
+    threading.Thread(target=push_state, args=(state, priority), daemon=True).start()
+
+
+def schedule_push(state):
+    """节流推送:冷却已过则立即推(leading,priority 10);冷却中则记下最新态、
+    到点合并推一发(trailing,priority 5——系统可合并、省 Apple 配额)。
+
+    Y(Asking=真等你决策)走即时快路径:它是最该即时、又稀有(不制造抖动量)的
+    终态,不该被节流压住,且取消任何挂起的旧 R/G 尾推以免回头盖掉黄灯。
+
+    保证:① 任一时刻最多每 PUSH_MIN_INTERVAL_S 推一发(Y 除外,稀有);② 突发/
+    持续抖动结束后,最终稳定态一定被推达(尾推发的是 _push_pending=最新聚合值)。
+    """
+    if state not in ("R", "Y", "G"):
+        return                       # '0'(灭/无会话)对手机无意义,维持原色
+    global _push_last_t, _push_timer, _push_pending
+    with _push_lock:
+        now = time.time()            # 锁内取时刻,leading/trailing 同一基准
+        if state == "Y":
+            _push_last_t = now
+            _push_pending = None     # 撤销挂起的旧态尾推,别用陈旧 R/G 盖掉 Y
+            _do_push(state, priority=10)
+        elif _push_timer is None and now - _push_last_t >= PUSH_MIN_INTERVAL_S:
+            _push_last_t = now
+            _do_push(state, priority=10)   # leading:窗口外第一发,即时高优先级
+        else:
+            _push_pending = state    # 冷却中:覆盖为最新态,等尾推
+            if _push_timer is None:
+                delay = max(0.0, PUSH_MIN_INTERVAL_S - (now - _push_last_t))
+                _push_timer = threading.Timer(delay, _flush_push)
+                _push_timer.daemon = True
+                _push_timer.start()
+
+
+def _flush_push():
+    global _push_last_t, _push_timer, _push_pending
+    with _push_lock:
+        _push_timer = None
+        state = _push_pending
+        _push_pending = None
+        if state is None:
+            return
+        _push_last_t = time.time()
+    _do_push(state, priority=5)       # trailing:churn 合并发,低优先级省配额
+
+
 def refresh_light(force=False):
     """重算聚合并刷新灯。
 
-    - 状态真正变化时:写串口 + 推中继 + 打日志。
-    - force=True(周期兜底):无条件再写一次串口,但不重复推中继/打日志。
+    - 状态真正变化时:写串口(即时)+ 经 schedule_push 节流推 APNs + 打日志。
+    - force=True(周期兜底):无条件再写一次串口,但不重复推/打日志。
       用来兜住"灯被拔插/复位后丢状态"——固件开机自检后会归 0(灭),而
       agent 这边聚合值没变就不会主动补发,于是灯一直停在灭。周期强制重发
       让重新插上的灯最多 LIGHT_REFRESH_S 秒自动恢复到当前状态。
@@ -243,7 +302,7 @@ def refresh_light(force=False):
         write_serial(agg)
     if changed:
         last_serial = agg
-        threading.Thread(target=push_state, args=(agg,), daemon=True).start()
+        schedule_push(agg)           # 节流:抖动期合并,不再每跳一发打爆 APNs
         print(f"[light] -> {agg}   sessions={summarize_sessions()}", file=sys.stderr)
     return agg
 
@@ -283,9 +342,10 @@ def drop_session(session_id):
 
 # ---- iOS 推送(本地 APNs 直推;未配 APNS 环境变量时空转)----
 
-def push_state(state):
+def push_state(state, priority=10):
     """把状态直推到所有已注册的手机 Live Activity。
 
+    priority 透传给 APNs(10=即时/leading,5=合并省预算/trailing,见 apns.push_all)。
     失败重试 2 次(1s/3s 退避):状态翻转频繁,单次推送丢失会让手机
     永久停在旧颜色直到下一次状态变化——这正是 Cloudflare 时代"灯卡绿"
     的根源,本地直推 + 重试 + light_loop 周期重推三层兜底。
@@ -299,7 +359,7 @@ def push_state(state):
         content_state["quota"] = current_quota
     for attempt, backoff in ((1, 1), (2, 3), (3, 0)):
         try:
-            results = apns.push_all(content_state)
+            results = apns.push_all(content_state, priority=priority)
             bad = [r for r in results if r["status"] not in (200, 400, 410)]
             if not bad:
                 return

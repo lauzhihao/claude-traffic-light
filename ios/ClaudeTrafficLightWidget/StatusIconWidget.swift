@@ -2,7 +2,7 @@ import WidgetKit
 import SwiftUI
 
 // 主屏「图标样式」小组件:底图(珊瑚星芒)+ 右下角状态圆点(R/Y/G)。
-// 数据:Widget 自己定时拉中继 /health 的 latest.state(App 没开也能刷)。
+// 数据:Widget 自己定时拉中继 GET /v1/state(Bearer)(App 没开也能刷)。
 // ⚠️ iOS 给 Widget 的刷新次数有每日配额,所以是「准实时」——可能滞后几分钟,
 //    要真·实时看状态请用灵动岛/锁屏的 Live Activity。
 
@@ -29,12 +29,13 @@ struct StatusProvider: TimelineProvider {
     }
 
     private func fetchState() async -> String {
-        guard let url = URL(string: "\(RelayConfig.url)/health") else { return "0" }
+        guard let url = URL(string: "\(RelayConfig.url)/v1/state") else { return "0" }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(RelayConfig.apiToken)", forHTTPHeaderField: "Authorization")
         guard
-            let (data, _) = try? await URLSession.shared.data(from: url),
+            let (data, _) = try? await URLSession.shared.data(for: req),
             let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let latest = obj["latest"] as? [String: Any],
-            let s = latest["state"] as? String
+            let s = obj["state"] as? String
         else { return "0" }
         return s
     }

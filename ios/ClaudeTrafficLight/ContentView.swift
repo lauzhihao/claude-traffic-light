@@ -21,6 +21,8 @@ struct ContentView: View {
     @State private var status: String = ""
     @State private var didSync = false
     @State private var booting = true   // 自检中:主灯红黄绿闪烁,完成后显真实状态
+    @State private var lastToken: String?   // 最近一次拿到的推送 token,前台补注册用
+    @State private var registered = false   // 最近一次注册是否成功
 
     var body: some View {
         NavigationStack {
@@ -46,7 +48,7 @@ struct ContentView: View {
                                     )
                                 }
                             }
-                            .font(.title2.weight(.bold))
+                            .font(CTType.serif(24, bold: true))   // Fraunces 接管灯状态文案,与灵动岛/锁屏一致
 
                             Spacer()
                         }
@@ -69,11 +71,19 @@ struct ContentView: View {
                     .padding(.bottom, 28)
                     .foregroundStyle(Color.ctInk)
                 }
+
+                // 剪贴板捕获:复制了抖音等平台分享链接进 App,弹卡问要不要交给沈括
+                ClipboardCaptureLayer()
             }
             .toolbar(.hidden, for: .navigationBar)
         }
         .task(id: scenePhase) {
-            if scenePhase == .active && !didSync { await bootstrap() }
+            guard scenePhase == .active else { return }
+            if !didSync { await bootstrap(); return }
+            // 回到前台:补一次灯态;注册上次没成功就重试——
+            // 后台/锁屏时 token 轮换触发的注册常被系统掐断,不能让错误一直挂着
+            await fetchLatest()
+            if !registered, let token = lastToken { await register(token: token) }
         }
     }
 
@@ -136,46 +146,45 @@ struct ContentView: View {
         }
     }
 
-    // 按 RelayConfig.urls 顺序尝试注册:家里走 .local,装了 Tailscale 走 100.x。
-    // 短超时,第一个不通马上换下一个,不让用户干等。
+    // 把本机 Live Activity push token 注册到中继(POST /v1/register,Bearer 鉴权)。
     func register(token: String) async {
-        var lastNote = "relay unreachable"
+        await MainActor.run { lastToken = token }
+        var notes: [String] = []
         for base in RelayConfig.urls {
-            guard let url = URL(string: "\(base)/register") else { continue }
+            guard let url = URL(string: "\(base)/v1/register") else { continue }
             var req = URLRequest(url: url)
-            req.timeoutInterval = 4
+            req.timeoutInterval = 6
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = try? JSONSerialization.data(withJSONObject: [
-                "token": token,
-                "secret": RelayConfig.registerSecret,
-            ])
+            req.setValue("Bearer \(RelayConfig.apiToken)", forHTTPHeaderField: "Authorization")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: ["deviceToken": token])
             do {
                 let (_, resp) = try await URLSession.shared.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 if code == 200 {
-                    await MainActor.run { status = "" }
+                    await MainActor.run { registered = true; status = "" }
                     return
                 }
-                lastNote = "HTTP \(code)"
+                notes.append("HTTP \(code)")
             } catch {
-                lastNote = error.localizedDescription
+                notes.append(error.localizedDescription)
             }
         }
-        await MainActor.run { status = "Registration failed (\(lastNote))" }
+        let detail = notes.joined(separator: " · ")
+        await MainActor.run { registered = false; status = "Registration failed — \(detail)" }
     }
 
-    // best-effort:从中继 /health 读一次当前状态,失败就静默。
+    // best-effort:从中继读一次当前状态(GET /v1/state,Bearer),失败就静默。
     func fetchLatest() async {
         for base in RelayConfig.urls {
-            guard let url = URL(string: "\(base)/health") else { continue }
+            guard let url = URL(string: "\(base)/v1/state") else { continue }
             var req = URLRequest(url: url)
-            req.timeoutInterval = 3
+            req.timeoutInterval = 4
+            req.setValue("Bearer \(RelayConfig.apiToken)", forHTTPHeaderField: "Authorization")
             guard
                 let (data, _) = try? await URLSession.shared.data(for: req),
                 let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                let latest = obj["latest"] as? [String: Any],
-                let s = latest["state"] as? String
+                let s = obj["state"] as? String
             else { continue }
             await MainActor.run { withAnimation { state = s } }
             return

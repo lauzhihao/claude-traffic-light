@@ -71,9 +71,13 @@ curl -s http://127.0.0.1:7321/health
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | 配额扫描目录 |
 | `CLAUDE_LIGHT_REGISTER_SECRET` | 空 | `/register` 的密钥（空 = 拒绝注册） |
 | `CLAUDE_LIGHT_CONFIG` | `~/.config/claude-traffic-light/config.json` | master/slaves 白名单 |
-| `CLAUDE_LIGHT_APNS_P8` / `_KEY_ID` / `_TEAM_ID` / `_BUNDLE_ID` / `_ENV` | 空 / `development` | APNs 直推凭据，见 `apns.py` |
+| `CLAUDE_LIGHT_APNS_P8` / `_KEY_ID` / `_TEAM_ID` / `_BUNDLE_ID` / `_ENV` | 空 / `development` | 本地直推模式的 APNs 凭据，见 `apns.py` |
+| `CLAUDE_LIGHT_RELAY_URL` | 空 | **中继模式**:设为中继地址(如 `https://apn.vooice.tech`)即改为上报中继而非本机直推 |
+| `CLAUDE_LIGHT_API_TOKEN` | 空 | 中继模式的用户 token(与 RELAY_URL 同时设才生效);iOS app 用同一个 |
 
-环境变量写进 `~/Library/LaunchAgents/com.claudelight.agent.plist`（`install.sh` 会生成），改完 `launchctl unload/load` 重启生效。
+**推送两模式**(互斥):配了 `CLAUDE_LIGHT_RELAY_URL` + `CLAUDE_LIGHT_API_TOKEN` → **中继模式**(状态上报给中继 `POST /v1/state`,中继持 .p8 推 APNs;纯 stdlib,无需 .venv,见 [`relay/`](../relay/));否则 → **本地直推**(本机持 .p8,需 `CLAUDE_LIGHT_APNS_*` + .venv)。`/health` 的 `push` 字段显示当前模式。
+
+环境变量写进 `~/Library/LaunchAgents/com.claudelight.agent.plist`（`install.sh` 会生成），改完 **`launchctl unload`+`load`**(不是 `kickstart`——后者不重读 plist 新增的环境变量)重启生效。
 
 ## 安全模型
 

@@ -125,6 +125,16 @@ async def register(body: RegisterBody, authorization: str | None = Header(None))
     return {"ok": True}
 
 
+@app.get("/v1/state")
+async def get_state(authorization: str | None = Header(None)):
+    # 供 iOS app 开屏 / 主屏 Widget 读当前灯色(鉴权,只能读自己的)。
+    # 无缓存(中继重启 / agent 还没上报过)→ 默认 G(空闲),对手机即"就绪"。
+    user = _auth_user(authorization, None)
+    cs = _last_state.get(user["id"])
+    return {"state": cs["state"] if cs else "G",
+            "updatedAt": cs["updatedAt"] if cs else int(time.time())}
+
+
 @app.post("/v1/state")
 async def state(body: StateBody, authorization: str | None = Header(None)):
     user = _auth_user(authorization, body.apiToken)

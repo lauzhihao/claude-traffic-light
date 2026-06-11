@@ -138,8 +138,28 @@ def _get_client():
         if _client is None:
             # trust_env=False:APNs 国内直连可达,显式绕开 HTTPS_PROXY 之类
             # 残留环境变量,这正是 Cloudflare 时代丢推送的根源。
-            _client = httpx.Client(http2=True, trust_env=False, timeout=10)
+            # timeout 收紧到 5s:连接假死时尽早失败、交给重连,别一发卡满 10s。
+            # keepalive_expiry=20s:国内长连接常被中间设备/GFW 静默掐死,复用半死
+            # 连接会每发都超时;限制 idle 存活,宁可重连(新建 TCP 实测 ~300ms)也不
+            # 赌一条可能已死的连接——这是"手机长时间停在旧状态"的根因。
+            _client = httpx.Client(
+                http2=True, trust_env=False,
+                timeout=httpx.Timeout(5.0),
+                limits=httpx.Limits(keepalive_expiry=20.0),
+            )
         return _client
+
+
+def _reset_client():
+    """丢弃当前(疑似假死的)连接,下次 _get_client 重建。"""
+    global _client
+    with _lock:
+        c, _client = _client, None
+    if c is not None:
+        try:
+            c.close()
+        except Exception:
+            pass
 
 
 # ---- 推送 ----
@@ -174,16 +194,23 @@ def push_all(content_state):
 
     results, dead = [], []
     for token in list(tokens):
-        try:
-            resp = client.post(
-                f"https://{_HOST}/3/device/{token}",
-                content=payload, headers=headers,
-            )
-            results.append({"token": token[:8] + "…", "status": resp.status_code})
-            if resp.status_code in (400, 410):
-                dead.append(token)
-        except Exception as e:
-            results.append({"token": token[:8] + "…", "status": type(e).__name__})
+        url = f"https://{_HOST}/3/device/{token}"
+        status = None
+        # 两次尝试:第一次失败(多半是连接假死)立即重建连接再试一次。
+        # 这样即便本轮第一个 token 撞上死连接,也只多花一次 5s 超时,后面的 token
+        # 全走新连接;配合 agent 侧 push_state 的 2 次重试,稳态丢推送基本绝迹。
+        for attempt in (1, 2):
+            try:
+                resp = client.post(url, content=payload, headers=headers)
+                status = resp.status_code
+                if status in (400, 410):
+                    dead.append(token)
+                break
+            except Exception as e:
+                status = type(e).__name__
+                _reset_client()          # 连接可能已死,丢弃重建
+                client = _get_client()   # 第二次尝试用新连接
+        results.append({"token": token[:8] + "…", "status": status})
 
     if dead:
         with _lock:

@@ -24,6 +24,21 @@ if [ ! -t 0 ]; then
   HOOK_JSON=$(cat)
 fi
 
+# smart-Notification:Notification hook 两种语义混在一起——
+#   "Claude needs your permission to use X"  = 真等你决策 → 该 Y
+#   "Claude is waiting for your input"        = 只是回合结束后空闲坐等 → 等于完成 G,不该亮黄
+# 后者会把"答完顺嘴问句『要不要我也…』"的会话误钉成 Asking,还周期性重发、刷新 ts 躲过淘汰。
+# 取 .message 判断:命中空闲文案 → 降级 G(再交给下面 smart-Stop 复核 Go 标记);
+# 其余(权限请求等)维持 Y。AskUserQuestion 的 PreToolUse 也走 Y 但无 .message → 不受影响。
+# 没装 jq → 维持原状(与 smart-Stop 一样的安全退化)。
+IDLE_NOTIFY_PATTERN="${CLAUDE_LIGHT_IDLE_NOTIFY_PATTERN:-waiting for your input}"
+if [ "$STATE" = "Y" ] && command -v jq >/dev/null 2>&1; then
+  _MSG=$(printf '%s' "$HOOK_JSON" | jq -r '.message // empty' 2>/dev/null)
+  if [ -n "${_MSG:-}" ] && printf '%s' "$_MSG" | grep -qiE "$IDLE_NOTIFY_PATTERN"; then
+    STATE=G
+  fi
+fi
+
 # smart-Stop:回合结束(G)时,若结束语是"等你授权/Go",改判为 Y(黄=等你决策)。
 # 标记可用 CLAUDE_LIGHT_WAIT_PATTERN 覆盖;取不到 transcript/没装 jq/不匹配 → 维持 G(安全退化)。
 WAIT_PATTERN="${CLAUDE_LIGHT_WAIT_PATTERN:-AWAITING AUTHORIZATION|Type .?Go.? to execute}"

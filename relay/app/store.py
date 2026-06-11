@@ -84,7 +84,9 @@ class Store:
 
     # ---- 设备 token ----
 
-    def add_device(self, user_id, device_token):
+    def add_device(self, user_id, device_token, cap=None):
+        """注册/刷新设备 token;cap 不为空时,超出上限就淘汰最旧(last_seen 最小)的,
+        防止单用户无限注册撑爆库 + 放大对 APNs 的推送扇出。"""
         now = int(time.time())
         with self._lock:
             self._db.execute(
@@ -92,6 +94,14 @@ class Store:
                 "VALUES(?,?,?,?) "
                 "ON CONFLICT(user_id, device_token) DO UPDATE SET last_seen=excluded.last_seen",
                 (user_id, device_token, now, now))
+            if cap:
+                # last_seen 是秒级,密集注册会撞秒;加 rowid(单调插入序)做确定性兜底,
+                # 保留「最近活跃 + 最后插入」的 cap 个,淘汰最旧。
+                self._db.execute(
+                    "DELETE FROM devices WHERE user_id=? AND device_token NOT IN "
+                    "(SELECT device_token FROM devices WHERE user_id=? "
+                    " ORDER BY last_seen DESC, rowid DESC LIMIT ?)",
+                    (user_id, user_id, cap))
             self._db.commit()
 
     def devices_for(self, user_id):

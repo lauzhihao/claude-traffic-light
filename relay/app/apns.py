@@ -108,14 +108,16 @@ class APNs:
                     limits=httpx.Limits(keepalive_expiry=20.0))
             return self._client
 
-    async def _reset_client(self):
+    async def _reset_client(self, broken=None):
+        """丢弃疑似假死的连接,下次 _get_client 重建。
+
+        并发安全:只在「当前 client 仍是调用方拿到的那个 broken」时才置空(代际 CAS),
+        避免把别的协程刚建好的新 client 误清。**不 aclose**——它可能仍被其它并发 push
+        持有,主动关会害得人家用到已关连接;交给 keepalive 过期/GC 回收即可。
+        """
         async with self._client_lock:
-            c, self._client = self._client, None
-        if c is not None:
-            try:
-                await c.aclose()
-            except Exception:
-                pass
+            if broken is None or self._client is broken:
+                self._client = None
 
     async def push(self, tokens, content_state, priority=10):
         """向一批 device token 推同一条更新。
@@ -151,7 +153,7 @@ class APNs:
                     break
                 except Exception as e:
                     status = type(e).__name__
-                    await self._reset_client()
+                    await self._reset_client(client)   # 只清这一代,不误伤并发协程
             results.append((token, status))
         return results
 

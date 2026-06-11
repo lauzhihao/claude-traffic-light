@@ -207,7 +207,9 @@ def push_all(content_state, priority=10):
             try:
                 resp = client.post(url, content=payload, headers=headers)
                 status = resp.status_code
-                if status in (400, 410):
+                # 只在 410(Unregistered=确定性已注销)剔除;400(BadDeviceToken)可能只是
+                # APNS_ENV(development/production)与 token 不匹配,据此删会清空有效 token。
+                if status == 410:
                     dead.append(token)
                 break
             except Exception as e:

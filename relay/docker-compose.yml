@@ -6,12 +6,16 @@ services:
       # "Temporary failure in name resolution";借宿主机(DNS 正常)的网络即可。
       network: host
     restart: unless-stopped
+    # 运行也走宿主网络:本服务只需绑 127.0.0.1:8088(对外由 nginx 反代)+ 出网打 APNs,
+    # 不需要 Docker bridge。host 网络绕开 docker-proxy/iptables DNAT——某些服务器
+    # 防火墙(firewalld 等)会冲掉 Docker 的 iptables 链,导致 bridge 网络创建失败;
+    # host 网络对此免疫,也更稳。
+    network_mode: host
+    command: ["uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8088"]
     env_file: .env
     environment:
       RELAY_DB: /data/relay.db
       RELAY_APNS_P8: /secrets/apns.p8
     volumes:
-      - ./data:/data                      # sqlite 持久化
+      - ./data:/data                                # sqlite 持久化
       - ${RELAY_APNS_P8_HOST}:/secrets/apns.p8:ro   # 宿主机 .p8 只读挂入
-    ports:
-      - "127.0.0.1:8088:8080"             # 只绑回环;对外由 nginx 反代,不直接暴露

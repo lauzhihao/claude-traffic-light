@@ -1,6 +1,10 @@
 services:
   relay:
-    build: .
+    build:
+      context: .
+      # 构建走宿主网络:有些服务器 Docker 默认 bridge 没配 DNS,pip 装依赖会
+      # "Temporary failure in name resolution";借宿主机(DNS 正常)的网络即可。
+      network: host
     restart: unless-stopped
     env_file: .env
     environment:

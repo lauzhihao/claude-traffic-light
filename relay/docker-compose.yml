@@ -1,0 +1,13 @@
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      RELAY_DB: /data/relay.db
+      RELAY_APNS_P8: /secrets/apns.p8
+    volumes:
+      - ./data:/data                      # sqlite 持久化
+      - ${RELAY_APNS_P8_HOST}:/secrets/apns.p8:ro   # 宿主机 .p8 只读挂入
+    ports:
+      - "127.0.0.1:8088:8080"             # 只绑回环;对外由 nginx 反代,不直接暴露

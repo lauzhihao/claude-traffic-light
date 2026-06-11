@@ -17,6 +17,10 @@ xcuserdata/
 
 # Secrets / local config
 *.env
+# 中继:密钥/数据库/本地 env 不进仓库
+relay/.env
+relay/data/
+*.p8
 .env
 secrets.json
 # 本机白名单配置(含具体 tailscale IP);仓库只放 agent/config.example.json
